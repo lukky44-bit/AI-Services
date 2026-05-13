@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 from .database import DatabaseManager
 from .tools import DBTools
 from .prompts import DBAnalystPrompts
+from .config import Config
 
 class DBAnalystAgent:
     """Orchestrates the LLM, Tools, and Prompts for the Database Analyst."""
@@ -17,7 +18,7 @@ class DBAnalystAgent:
         self.prompt = DBAnalystPrompts.get_prompt_template()
         
         # Initialize LLM
-        self.llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+        self.llm = ChatGroq(model=Config.LLM_MODEL, temperature=Config.LLM_TEMPERATURE)
         
         # Create Agent and Executor
         self.agent = create_tool_calling_agent(self.llm, self.tools, self.prompt)
