@@ -1,0 +1,6 @@
+.env
+queryies.txt
+run.sh
+.vscode/
+.venv/
+__pycache__/
