@@ -61,6 +61,10 @@ class MetricParser:
         if not raw_str:
             return "-"
         parts = raw_str.strip().split()
+        if len(parts) >= 5 and parts[2] == "out" and parts[3] == "of":
+            return f"{parts[0]} ({parts[1]}/{parts[4]})"
+        if len(parts) >= 2:
+            return f"{parts[0]} ({parts[1]})"
         if parts:
             return parts[0]
         return "-"
@@ -70,6 +74,15 @@ class MetricParser:
         if not raw_str:
             return "-"
         parts = raw_str.strip().split()
+        if len(parts) >= 2:
+            min_val = "-"
+            max_val = "-"
+            for p in parts[1:]:
+                if p.startswith("min="):
+                    min_val = p.split("=")[1]
+                elif p.startswith("max="):
+                    max_val = p.split("=")[1]
+            return f"{parts[0]} (min: {min_val}, max: {max_val})"
         if parts:
             return parts[0]
         return "-"
@@ -299,13 +312,23 @@ class PDFReportBuilder:
             Paragraph(h, cell_header_style if i == 0 else cell_header_center)
             for i, h in enumerate(rates_headers)
         ]]
+        
         checks_rate = "-"
         if "checks_succeeded" in self.metrics:
             checks_rate = MetricParser.parse_rate(self.metrics["checks_succeeded"])
         rates_data.append([
-            Paragraph("checks", cell_data_style),
+            Paragraph("checks_succeeded", cell_data_style),
             Paragraph(checks_rate, cell_data_center)
         ])
+        
+        checks_failed = "-"
+        if "checks_failed" in self.metrics:
+            checks_failed = MetricParser.parse_rate(self.metrics["checks_failed"])
+        rates_data.append([
+            Paragraph("checks_failed", cell_data_style),
+            Paragraph(checks_failed, cell_data_center)
+        ])
+        
         failed_rate = "-"
         if "http_req_failed" in self.metrics:
             failed_rate = MetricParser.parse_rate(self.metrics["http_req_failed"])

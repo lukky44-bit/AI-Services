@@ -15,5 +15,5 @@ class Config:
     DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
     
     # LLM Configuration
-    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
     LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
