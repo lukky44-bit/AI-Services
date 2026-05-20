@@ -1,6 +1,7 @@
 from typing import Literal
 from langchain_core.tools import StructuredTool
 from .database import DatabaseManager
+from .report_generator import PDFReportBuilder
 
 MetricType = Literal[
     "k6_vus", 
@@ -99,6 +100,29 @@ class DBTools:
         conn.close()
         return str(result) if result else "Run metadata not found."
 
+    def _generate_pdf_report(self, run_id: str) -> str:
+        """
+        Generates a beautifully formatted PDF report of the test summaries for the given run_id.
+        The PDF includes Trends, Counters, Rates, and Gauges.
+        Returns the file path of the generated PDF file.
+        """
+        conn = self.db_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT metrics FROM test_summaries WHERE run_id = %s;", (run_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            return f"Summary not found for run_id: {run_id}. Unable to generate PDF."
+        
+        metrics = result[0]
+        try:
+            builder = PDFReportBuilder(run_id, metrics)
+            pdf_path = builder.build()
+            return f"PDF report successfully generated at: {pdf_path}"
+        except Exception as e:
+            return f"Error generating PDF report: {e}"
+
     def get_tools(self) -> list[StructuredTool]:
         """Returns the list of tools configured for LangChain."""
         return [
@@ -121,5 +145,10 @@ class DBTools:
                 func=self._get_test_metadata,
                 name="get_test_metadata",
                 description="Fetches the configuration metadata for a run, such as the number of VUs and the k6 script used."
+            ),
+            StructuredTool.from_function(
+                func=self._generate_pdf_report,
+                name="generate_pdf_report",
+                description="Generates a beautifully formatted PDF report of the test summaries (Trends, Counters, Rates, Gauges) for a given run_id. Returns the path to the saved PDF file."
             )
         ]
