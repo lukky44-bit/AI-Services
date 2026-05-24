@@ -140,9 +140,11 @@ class PDFReportBuilder:
         # Strip duplicated "run_" prefix if present in the run_id to avoid double naming
         clean_run_id = run_id[4:] if run_id.startswith("run_") else run_id
         
-        # Use workspace-relative paths
-        os.makedirs("reports", exist_ok=True)
-        self.output_path = f"reports/run_{clean_run_id}_summary.pdf"
+        # Determine reports path relative to this file's location to be CWD-independent
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        reports_dir = os.path.join(current_dir, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        self.output_path = os.path.join(reports_dir, f"run_{clean_run_id}_summary.pdf")
 
     def build(self) -> str:
         # Use 0.5 inch margins (36 pt)
@@ -216,6 +218,8 @@ class PDFReportBuilder:
         # 1. Page Header (Title + Left Gray Vertical Bar)
         header_text = [
             Paragraph("Summary", title_style),
+            Spacer(1, 4),
+            Paragraph(f"<b>Test Run ID:</b> {self.run_id}", subtitle_style),
             Spacer(1, 4),
             Paragraph("This chapter provides a summary of the test run metrics. The tables contain the aggregated values of the metrics for the entire test run.", subtitle_style)
         ]

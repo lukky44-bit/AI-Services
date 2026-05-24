@@ -28,7 +28,13 @@ class DBTools:
             "k6_http_req_duration_p99", "k6_http_reqs_total", "k6_http_req_failed_rate",
             "k6_iteration_duration_avg", "k6_iteration_duration_min", "k6_iteration_duration_max",
             "k6_iteration_duration_p90", "k6_iteration_duration_p95", "k6_iteration_duration_p99",
-            "k6_iterations_total", "k6_data_received_total", "k6_data_sent_total", "k6_checks_rate"
+            "k6_iterations_total", "k6_data_received_total", "k6_data_sent_total", "k6_checks_rate",
+            "k6_http_req_waiting_avg", "k6_http_req_waiting_min", "k6_http_req_waiting_max",
+            "k6_http_req_waiting_p90", "k6_http_req_waiting_p95", "k6_http_req_waiting_p99",
+            "k6_http_req_receiving_avg", "k6_http_req_receiving_min", "k6_http_req_receiving_max",
+            "k6_http_req_receiving_p90", "k6_http_req_receiving_p95", "k6_http_req_receiving_p99",
+            "k6_http_req_sending_avg", "k6_http_req_sending_min", "k6_http_req_sending_max",
+            "k6_http_req_sending_p90", "k6_http_req_sending_p95", "k6_http_req_sending_p99"
         ]
         
         # Clean the input metric name
