@@ -28,7 +28,7 @@ class RunnerAgent:
         self.prompt = RunnerAgentPrompts.get_prompt_template()
         
         # Initialize LLM
-        model_name = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+        model_name = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
         temperature = float(os.getenv("LLM_TEMPERATURE", "0.0"))
         self.llm = ChatGroq(model=model_name, temperature=temperature)
         

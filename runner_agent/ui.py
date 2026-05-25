@@ -103,8 +103,42 @@ def render_ui():
                         
                         if "Workflow status: Completed" in content:
                             st.session_state.runner_test_running = False
-                            # We also tell the chat history that test is executed
-                            st.session_state.runner_messages.append({"role": "assistant", "content": "Test is executed."})
+                            
+                            # Fetch test summaries from DB
+                            try:
+                                from db_analyst_agent.database import DatabaseManager
+                                import json
+                                db = DatabaseManager()
+                                conn = db.get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute("SELECT metrics FROM test_summaries WHERE run_id = %s;", (run_id,))
+                                result = cursor.fetchone()
+                                conn.close()
+                                
+                                if result and result[0]:
+                                    metrics = result[0]
+                                    if isinstance(metrics, str):
+                                        metrics = json.loads(metrics)
+                                    
+                                    # Humanize the metrics into a Markdown table
+                                    table_md = "| Metric | Result |\n|---|---|\n"
+                                    for key, val in metrics.items():
+                                        # Capitalize keys and replace underscores
+                                        human_key = key.replace("_", " ").title()
+                                        
+                                        # Clean up multiple whitespaces in the value
+                                        clean_value = " ".join(str(val).split())
+                                        
+                                        table_md += f"| **{human_key}** | {clean_value} |\n"
+                                    
+                                    # Format nicely as Markdown
+                                    summary_md = f"**Test Execution Completed!** 🎉\n\n### Summary Metrics for run: `{run_id}`\n\n{table_md}"
+                                    st.session_state.runner_messages.append({"role": "assistant", "content": summary_md})
+                                else:
+                                    st.session_state.runner_messages.append({"role": "assistant", "content": f"**Test Failed**: No summary data was written to the database for run `{run_id}`."})
+                            except Exception as db_e:
+                                st.session_state.runner_messages.append({"role": "assistant", "content": f"Test executed, but failed to fetch summary from DB: {db_e}"})
+                            
                             break
         except Exception as e:
             st.session_state.runner_test_status = f"Error: {e}"
