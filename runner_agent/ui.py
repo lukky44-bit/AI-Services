@@ -159,18 +159,10 @@ def render_ui():
                                             error_lines.append(clean_log)
                                             
                                     error_msg_str = "\n".join(error_lines) if error_lines else "Unknown execution or database write error occurred."
-                                    fail_md = f"**Test Failed** ❌\n\n**Reason:**\n```text\n{error_msg_str}\n```"
-                                    st.session_state.runner_messages.append({
-                                        "role": "assistant", 
-                                        "content": fail_md
-                                    })
+                                    st.session_state.runner_test_status = error_msg_str
                                     st.session_state.runner_test_success = False
                             except Exception as db_e:
-                                fail_db_md = f"**Test Failed** ❌\n\n**Error:** {db_e}"
-                                st.session_state.runner_messages.append({
-                                    "role": "assistant", 
-                                    "content": fail_db_md
-                                })
+                                st.session_state.runner_test_status = f"Database Error: {db_e}"
                                 st.session_state.runner_test_success = False
                             
                             break

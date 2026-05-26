@@ -14,14 +14,18 @@ st.set_page_config(page_title="AI Driven Performance Testing", layout="wide")
 # Import the UIs (this happens after sys.path is updated)
 from runner_agent.ui import render_ui as render_runner_ui
 from db_analyst_agent.ui import render_ui as render_db_ui
+from rag_agent.ui import render_ui as render_rag_ui
 
 st.markdown("<h1 style='text-align: center; color: #2C3E50;'>AI Driven Performance Testing</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-tab1, tab2 = st.tabs(["Runner Agent", "DB Analyst"])
+tab1, tab2, tab3 = st.tabs(["Runner Agent", "DB Analyst", "K6 Expert"])
 
 with tab1:
     render_runner_ui()
 
 with tab2:
     render_db_ui()
+
+with tab3:
+    render_rag_ui()

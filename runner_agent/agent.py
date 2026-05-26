@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
 from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain.memory import ConversationSummaryBufferMemory
 
 try:
     from .tools import RunnerTools
@@ -40,10 +41,51 @@ class RunnerAgent:
             verbose=True, 
             return_intermediate_steps=True
         )
+        
+        # Initialize Memory
+        self.memory = ConversationSummaryBufferMemory(
+            llm=self.llm,
+            max_token_limit=1500,
+            memory_key="messages",
+            return_messages=True
+        )
+
+    def _sync_memory(self, messages: list):
+        """Syncs the ConversationSummaryBufferMemory with incoming UI messages."""
+        self.memory.clear()
+        i = 0
+        while i < len(messages) - 1:
+            msg = messages[i]
+            if isinstance(msg, HumanMessage) and i + 1 < len(messages):
+                next_msg = messages[i+1]
+                if isinstance(next_msg, AIMessage):
+                    self.memory.save_context(
+                        {"input": msg.content},
+                        {"output": next_msg.content}
+                    )
+                    i += 2
+                    continue
+            i += 1
 
     def invoke(self, state: dict) -> dict:
         """Processes the state and returns the response for the orchestrator."""
-        result = self.executor.invoke({"messages": state["messages"]})
+        messages = state.get("messages", [])
+        if not messages:
+            return {"messages": []}
+            
+        # 1. Sync memory with UI chat history (except the new query)
+        self._sync_memory(messages[:-1])
+        
+        # 2. Load the summarized/buffered history
+        memory_vars = self.memory.load_memory_variables({})
+        history = memory_vars.get("messages", [])
+        
+        # 3. Add the latest user query
+        latest_query = messages[-1]
+        history.append(latest_query)
+        
+        # 4. Invoke AgentExecutor with pruned history
+        result = self.executor.invoke({"messages": history})
         
         return {
             "messages": [

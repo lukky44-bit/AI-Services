@@ -160,8 +160,8 @@ MODE SELECTION
 Use SIMPLE MODE ONLY:
 
 export const options = {
-   vus:X,
-   duration:"Xs"
+   vus: 10,
+   duration: "10s"
 }
 
 ONLY when ALL are true:
@@ -425,6 +425,7 @@ Before output verify:
 8. No duplicate config
 9. No invalid executor usage
 10. Uses scenarios when not smoke
+11. No invalid duration values (such as "s", "m", "h", "Xs", "Xm", etc.). All durations MUST have a numeric prefix (e.g., "10s", "5m").
 
 If invalid regenerate internally.
         """
@@ -466,6 +467,10 @@ If invalid regenerate internally.
                 if "gracefulRampDown" not in line:
                     cleaned_lines.append(line)
             script = "\n".join(cleaned_lines)
+            
+        # Programmatically fix any hallucinated invalid duration values (e.g. "s", "m", "h", "Xs") to "10s"
+        import re
+        script = re.sub(r'(["\'])(s|m|h|Xs|Xm|Xh|X)\1', r'\110s\1', script)
             
         return script
 

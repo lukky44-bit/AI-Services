@@ -5,3 +5,4 @@ run.sh
 .venv/
 __pycache__/
 db_analyst_agent/reports/
+rag_agent/AI-Services/rag_agent/k6_chroma_db/

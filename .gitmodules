@@ -1,0 +1,3 @@
+[submodule "rag_agent"]
+	path = rag_agent
+	url = https://github.com/dedheepyap/k6-rag-agent.git
