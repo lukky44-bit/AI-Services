@@ -336,6 +336,7 @@ maxVUs:200
 Never use:
 
 timeUnit:"seconds"
+gracefulRampDown (only valid for ramping-vus. Never include gracefulRampDown for arrival-rate or other executors!)
 
 DEFAULT COMPONENTS
 
@@ -408,6 +409,7 @@ extra functions
 export function gracefulRampDown()
 export const vus
 export const iterations
+gracefulRampDown (unless the executor is ramping-vus)
 
 SELF VALIDATION
 
@@ -456,6 +458,14 @@ If invalid regenerate internally.
             script = script[script.find('import '):]
         if '}' in script:
             script = script[:script.rfind('}') + 1]
+            
+        # Programmatically remove gracefulRampDown if this is not a ramping-vus executor
+        if "ramping-vus" not in script:
+            cleaned_lines = []
+            for line in script.splitlines():
+                if "gracefulRampDown" not in line:
+                    cleaned_lines.append(line)
+            script = "\n".join(cleaned_lines)
             
         return script
 

@@ -23,7 +23,7 @@ from runner_agent.tools import RunnerTools
 
 # Set up page config
 def render_ui():
-    st.title("Runner Agent - k6 Load Testing")
+    st.title("Runner Agent")
 
     # Initialize session state
     if "runner_messages" not in st.session_state:
@@ -52,6 +52,9 @@ def render_ui():
 
     if "runner_is_manual_script" not in st.session_state:
         st.session_state.runner_is_manual_script = False
+
+    if "runner_test_success" not in st.session_state:
+        st.session_state.runner_test_success = None
 
     def format_js(code):
         import subprocess
@@ -91,6 +94,7 @@ def render_ui():
         endpoint = os.getenv("RUNNER_TRIGGER_URL", "http://localhost:8081/run-test").strip()
         
         try:
+            accumulated_logs = []
             res = requests.post(endpoint, json=payload, stream=True, timeout=3600)
             for line in res.iter_lines():
                 if line:
@@ -100,6 +104,7 @@ def render_ui():
                     if decoded.startswith("data: "):
                         content = decoded[6:].strip()
                         st.session_state.runner_test_status = content
+                        accumulated_logs.append(content)
                         
                         if "Workflow status: Completed" in content:
                             st.session_state.runner_test_running = False
@@ -133,11 +138,40 @@ def render_ui():
                                     
                                     # Format nicely as Markdown
                                     summary_md = f"**Test Execution Completed!** 🎉\n\n### Summary Metrics for run: `{run_id}`\n\n{table_md}"
-                                    st.session_state.runner_messages.append({"role": "assistant", "content": summary_md})
+                                    st.session_state.runner_messages.append({
+                                        "role": "assistant", 
+                                        "content": summary_md,
+                                        "run_id": run_id
+                                    })
+                                    st.session_state.runner_test_success = True
                                 else:
-                                    st.session_state.runner_messages.append({"role": "assistant", "content": f"**Test Failed**: No summary data was written to the database for run `{run_id}`."})
+                                    # Extract errors from accumulated logs
+                                    error_lines = []
+                                    for log in accumulated_logs:
+                                        if "level=error" in log.lower() or "[error]" in log.lower() or "exited with error" in log.lower():
+                                            clean_log = log
+                                            if "[stderr]" in clean_log:
+                                                clean_log = clean_log.split("[stderr]")[-1].strip()
+                                            if "[STDERR]" in clean_log:
+                                                clean_log = clean_log.split("[STDERR]")[-1].strip()
+                                            if "[stdout]" in clean_log:
+                                                clean_log = clean_log.split("[stdout]")[-1].strip()
+                                            error_lines.append(clean_log)
+                                            
+                                    error_msg_str = "\n".join(error_lines) if error_lines else "Unknown execution or database write error occurred."
+                                    fail_md = f"**Test Failed** ❌\n\n**Reason:**\n```text\n{error_msg_str}\n```"
+                                    st.session_state.runner_messages.append({
+                                        "role": "assistant", 
+                                        "content": fail_md
+                                    })
+                                    st.session_state.runner_test_success = False
                             except Exception as db_e:
-                                st.session_state.runner_messages.append({"role": "assistant", "content": f"Test executed, but failed to fetch summary from DB: {db_e}"})
+                                fail_db_md = f"**Test Failed** ❌\n\n**Error:** {db_e}"
+                                st.session_state.runner_messages.append({
+                                    "role": "assistant", 
+                                    "content": fail_db_md
+                                })
+                                st.session_state.runner_test_success = False
                             
                             break
         except Exception as e:
@@ -153,6 +187,10 @@ def render_ui():
         for i, msg in enumerate(st.session_state.runner_messages):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if "run_id" in msg:
+                    grafana_url = f"http://localhost:3000/d/k6-live-overview/k6-live-overview?orgId=1&from=now-1h&to=now&timezone=browser&var-test_run_id={msg['run_id']}&refresh=5s"
+                    href = f'<br><a href="{grafana_url}" target="_blank">*View dashboard*</a>'
+                    st.markdown(href, unsafe_allow_html=True)
                 
         # --- Interactive Chat Box Controls ---
         if st.session_state.runner_pending_script and not st.session_state.runner_test_running:
@@ -211,6 +249,11 @@ def render_ui():
                     
                 # Conditionally show the Stop button if it's running
                 if status and "Workflow status: Running" in status:
+                    run_id = st.session_state.runner_run_id
+                    grafana_url = f"http://localhost:3000/d/k6-live-overview/k6-live-overview?orgId=1&from=now-1h&to=now&timezone=browser&var-test_run_id={run_id}&refresh=5s"
+                    href = f'<br><a href="{grafana_url}" target="_blank">*View dashboard*</a><br><br>'
+                    st.markdown(href, unsafe_allow_html=True)
+                    
                     if st.button("Stop Test", use_container_width=True, type="primary"):
                         run_id = st.session_state.runner_run_id
                         st.session_state.runner_messages.append({"role": "user", "content": f"Stopping test with run_id: {run_id}"})
@@ -220,9 +263,17 @@ def render_ui():
                                 stop_endpoint = os.getenv("RUNNER_STOP_URL", "http://localhost:8081/stop").strip()
                                 res = requests.post(stop_endpoint, json={"run_id": run_id}, timeout=30)
                                 raw = res.json() if res.ok else res.text
-                                st.session_state.runner_messages.append({"role": "assistant", "content": f"**Stop Response:**\n```json\n{raw}\n```"})
+                                st.session_state.runner_messages.append({
+                                    "role": "assistant", 
+                                    "content": f"**Stop Response:**\n```json\n{raw}\n```",
+                                    "run_id": run_id
+                                })
                             except Exception as e:
-                                st.session_state.runner_messages.append({"role": "assistant", "content": f"Error stopping test: {e}"})
+                                st.session_state.runner_messages.append({
+                                    "role": "assistant", 
+                                    "content": f"Error stopping test: {e}",
+                                    "run_id": run_id
+                                })
                         
                         st.session_state.runner_test_running = False
                         st.session_state.runner_run_id = None
@@ -234,11 +285,16 @@ def render_ui():
                 
         elif st.session_state.runner_run_id and st.session_state.runner_test_status and "Workflow status: Completed" in st.session_state.runner_test_status:
             with st.chat_message("assistant"):
-                st.success("Test Completed!")
-                st.code(st.session_state.runner_test_status, language="json")
+                if st.session_state.get("runner_test_success", True):
+                    st.success("Test Completed!")
+                    st.code(st.session_state.runner_test_status, language="json")
+                else:
+                    st.error("Test Failed")
+                    st.code(st.session_state.runner_test_status, language="text")
                 if st.button("Dismiss"):
                     st.session_state.runner_run_id = None
                     st.session_state.runner_test_status = None
+                    st.session_state.runner_test_success = None
                     st.rerun()
 
     st.markdown("---")
@@ -290,19 +346,24 @@ def render_ui():
                     state = {"messages": langchain_messages}
                     response = st.session_state.runner_agent.invoke(state)
                     ans = response["messages"][0].content
-                    st.session_state.runner_messages.append({"role": "assistant", "content": ans})
                     
                     # Check intermediate steps to see if a script was generated
+                    script_generated = False
                     intermediate_steps = response.get("intermediate_steps", [])
                     for action, observation in intermediate_steps:
                         if action.tool == "generate_k6_script":
+                            script_generated = True
                             st.session_state.runner_pending_script = observation
                             st.session_state.runner_is_manual_script = False
                             st.session_state.runner_pending_vus = action.tool_input.get("vus", None)
-                            st.session_state.runner_messages.append({
-                                "role": "assistant",
-                                "content": f"**Generated k6 Script:**\n```javascript\n{observation}\n```\n\nWould you like to run it?"
-                            })
+                            
+                    if script_generated:
+                        st.session_state.runner_messages.append({
+                            "role": "assistant",
+                            "content": f"```javascript\n{st.session_state.runner_pending_script}\n```"
+                        })
+                    else:
+                        st.session_state.runner_messages.append({"role": "assistant", "content": ans})
                             
                 except Exception as e:
                     error_msg = f"Error: {e}"

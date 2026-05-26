@@ -16,7 +16,7 @@ REPORTS_DIR = os.path.join(current_dir, "reports")
 
 # Set up page config
 def render_ui():
-    st.title("Database Analyst - k6 Test Results")
+    st.title("Database Analyst")
 
     # Initialize session state for chat history and agent
     if "db_messages" not in st.session_state:
