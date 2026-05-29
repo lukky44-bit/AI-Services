@@ -9,13 +9,26 @@ class MetricParser:
     """Parses raw text metrics from PostgreSQL JSON into structured fields."""
     
     @staticmethod
-    def parse_trend(raw_str: str) -> dict:
+    def parse_trend(val) -> dict:
         res = {
             "avg": "-", "max": "-", "med": "-", "min": "-",
             "p90": "-", "p95": "-", "p99": "-"
         }
-        if not raw_str:
+        if not val:
             return res
+        if isinstance(val, dict):
+            values = val.get("values", {})
+            contains_time = val.get("contains") == "time"
+            suffix = "ms" if contains_time else ""
+            for k in ["avg", "max", "med", "min"]:
+                if k in values:
+                    res[k] = f"{values[k]:.2f}{suffix}" if isinstance(values[k], (int, float)) else str(values[k])
+            for p_key, res_key in [("p(90)", "p90"), ("p(95)", "p95"), ("p(99)", "p99")]:
+                if p_key in values:
+                    res[res_key] = f"{values[p_key]:.2f}{suffix}" if isinstance(values[p_key], (int, float)) else str(values[p_key])
+            return res
+            
+        raw_str = str(val)
         matches = re.findall(r"([\w()]+)=([\w.]+ms|[\w.]+s|[\w.]+)", raw_str)
         for k, v in matches:
             # Clean parentheses to match dict keys (e.g., p(90) -> p90)
@@ -25,10 +38,41 @@ class MetricParser:
         return res
 
     @staticmethod
-    def parse_counter(raw_str: str) -> dict:
+    def parse_counter(val) -> dict:
         res = {"count": "-", "rate": "-"}
-        if not raw_str:
+        if not val:
             return res
+        if isinstance(val, dict):
+            values = val.get("values", {})
+            count = values.get("count", "-")
+            rate = values.get("rate", "-")
+            contains_data = val.get("contains") == "data"
+            
+            if contains_data and isinstance(count, (int, float)):
+                if count >= 1024 * 1024:
+                    res["count"] = f"{count / (1024 * 1024):.2f} MB"
+                elif count >= 1024:
+                    res["count"] = f"{count / 1024:.2f} kB"
+                else:
+                    res["count"] = f"{count} B"
+            else:
+                res["count"] = f"{count:,}" if isinstance(count, (int, float)) else str(count)
+                
+            if isinstance(rate, (int, float)):
+                if contains_data:
+                    if rate >= 1024 * 1024:
+                        res["rate"] = f"{rate / (1024 * 1024):.2f} MB/s"
+                    elif rate >= 1024:
+                        res["rate"] = f"{rate / 1024:.2f} kB/s"
+                    else:
+                        res["rate"] = f"{rate:.2f} B/s"
+                else:
+                    res["rate"] = f"{rate:.2f}/s"
+            else:
+                res["rate"] = str(rate)
+            return res
+            
+        raw_str = str(val)
         # Split by two or more spaces first
         parts = re.split(r'\s{2,}', raw_str.strip())
         if len(parts) >= 2:
@@ -57,9 +101,18 @@ class MetricParser:
         return res
 
     @staticmethod
-    def parse_rate(raw_str: str) -> str:
-        if not raw_str:
+    def parse_rate(val) -> str:
+        if not val:
             return "-"
+        if isinstance(val, dict):
+            values = val.get("values", {})
+            rate = values.get("rate", 0)
+            fails = values.get("fails", 0)
+            passes = values.get("passes", 0)
+            percentage = rate * 100
+            return f"{percentage:.2f}% ({passes}/{passes + fails})"
+            
+        raw_str = str(val)
         parts = raw_str.strip().split()
         if len(parts) >= 5 and parts[2] == "out" and parts[3] == "of":
             return f"{parts[0]} ({parts[1]}/{parts[4]})"
@@ -70,9 +123,17 @@ class MetricParser:
         return "-"
 
     @staticmethod
-    def parse_gauge(raw_str: str) -> str:
-        if not raw_str:
+    def parse_gauge(val) -> str:
+        if not val:
             return "-"
+        if isinstance(val, dict):
+            values = val.get("values", {})
+            value = values.get("value", "-")
+            min_val = values.get("min", "-")
+            max_val = values.get("max", "-")
+            return f"{value} (min: {min_val}, max: {max_val})"
+            
+        raw_str = str(val)
         parts = raw_str.strip().split()
         if len(parts) >= 2:
             min_val = "-"
@@ -135,7 +196,13 @@ class PDFReportBuilder:
     
     def __init__(self, run_id: str, metrics: dict):
         self.run_id = run_id
-        self.metrics = metrics
+        self.raw_summary = metrics
+        
+        # If it's the new JSONB format, the actual metrics are nested under 'metrics'
+        if isinstance(metrics, dict) and "metrics" in metrics:
+            self.metrics = metrics["metrics"]
+        else:
+            self.metrics = metrics
         
         # Strip duplicated "run_" prefix if present in the run_id to avoid double naming
         clean_run_id = run_id[4:] if run_id.startswith("run_") else run_id
@@ -249,7 +316,7 @@ class PDFReportBuilder:
             for i, h in enumerate(trends_headers)
         ]]
         
-        trend_metrics = ["http_req_duration", "iteration_duration"]
+        trend_metrics = ["http_req_duration", "http_req_waiting", "http_req_connecting", "iteration_duration"]
         for tm in trend_metrics:
             if tm in self.metrics:
                 parsed = MetricParser.parse_trend(self.metrics[tm])
@@ -320,6 +387,8 @@ class PDFReportBuilder:
         checks_rate = "-"
         if "checks_succeeded" in self.metrics:
             checks_rate = MetricParser.parse_rate(self.metrics["checks_succeeded"])
+        elif "checks" in self.metrics:
+            checks_rate = MetricParser.parse_rate(self.metrics["checks"])
         rates_data.append([
             Paragraph("checks_succeeded", cell_data_style),
             Paragraph(checks_rate, cell_data_center)
@@ -328,6 +397,15 @@ class PDFReportBuilder:
         checks_failed = "-"
         if "checks_failed" in self.metrics:
             checks_failed = MetricParser.parse_rate(self.metrics["checks_failed"])
+        elif "checks" in self.metrics:
+            checks_val = self.metrics["checks"]
+            if isinstance(checks_val, dict):
+                values = checks_val.get("values", {})
+                rate = values.get("rate", 0)
+                fails = values.get("fails", 0)
+                passes = values.get("passes", 0)
+                fail_percentage = (1 - rate) * 100
+                checks_failed = f"{fail_percentage:.2f}% ({fails}/{passes + fails})"
         rates_data.append([
             Paragraph("checks_failed", cell_data_style),
             Paragraph(checks_failed, cell_data_center)
@@ -403,12 +481,124 @@ class PDFReportBuilder:
         ]))
         story.append(layout_table)
         
+        # 3.5. Checks Section (Optional, only if checks exist in the metrics)
+        checks_data = []
+        root_group = self.raw_summary.get("root_group", {}) if isinstance(self.raw_summary, dict) else {}
+        if root_group:
+            # support both root and nested checks in groups recursively
+            def process_group_pdf(group, prefix=""):
+                for check in group.get("checks", []):
+                    name = check.get("name", "check")
+                    passes = check.get("passes", 0)
+                    fails = check.get("fails", 0)
+                    total = passes + fails
+                    pct = (passes / total * 100) if total > 0 else 0.0
+                    status = "Pass" if fails == 0 else "Fail"
+                    checks_data.append({
+                        "name": f"{prefix}{name}",
+                        "passes": passes,
+                        "fails": fails,
+                        "percentage": f"{pct:.2f}%",
+                        "status": status
+                    })
+                for sub_group in group.get("groups", []):
+                    sub_name = sub_group.get("name", "")
+                    process_group_pdf(sub_group, prefix=f"{prefix}{sub_name} > ")
+                    
+            process_group_pdf(root_group)
+            
+        if checks_data:
+            story.append(Spacer(1, 24))
+            story.append(Paragraph("Checks", section_style))
+            story.append(Spacer(1, 8))
+            
+            checks_headers = ["Check Name", "Passed", "Failed", "Success Rate", "Status"]
+            checks_table_data = [[
+                Paragraph(h, cell_header_style if i == 0 else cell_header_center)
+                for i, h in enumerate(checks_headers)
+            ]]
+            
+            pass_style = ParagraphStyle(
+                name='CheckPassStyle',
+                parent=cell_data_center,
+                textColor=colors.HexColor('#27AE60'),
+                fontName='Helvetica-Bold'
+            )
+            fail_style = ParagraphStyle(
+                name='CheckFailStyle',
+                parent=cell_data_center,
+                textColor=colors.HexColor('#C0392B'),
+                fontName='Helvetica-Bold'
+            )
+            
+            for cd in checks_data:
+                status_style = cell_data_center
+                if cd["status"] == "Pass":
+                    status_style = pass_style
+                else:
+                    status_style = fail_style
+                    
+                checks_table_data.append([
+                    Paragraph(cd["name"], cell_data_style),
+                    Paragraph(str(cd["passes"]), cell_data_center),
+                    Paragraph(str(cd["fails"]), cell_data_center),
+                    Paragraph(cd["percentage"], cell_data_center),
+                    Paragraph(cd["status"], status_style)
+                ])
+                
+            checks_table = Table(
+                checks_table_data,
+                colWidths=[240, 75, 75, 75, 75]
+            )
+            checks_table.setStyle(TableStyle([
+                ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
+                ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#BDC3C7')),
+                ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING', (0,0), (-1,-1), 6),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+                ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(checks_table)
+        
         # 4. Thresholds Section (Optional, only if thresholds exist in the metrics)
         thresholds_data = []
-        for k, v in self.metrics.items():
-            if k.startswith("threshold"):
-                parsed = MetricParser.parse_threshold(k, v)
-                thresholds_data.append(parsed)
+        if isinstance(self.raw_summary, dict) and "metrics" in self.raw_summary:
+            for metric_name, metric_data in self.raw_summary["metrics"].items():
+                if isinstance(metric_data, dict) and "thresholds" in metric_data:
+                    for cond, status_dict in metric_data["thresholds"].items():
+                        ok = status_dict.get("ok", True)
+                        status = "Pass" if ok else "Fail"
+                        actual = "-"
+                        values = metric_data.get("values", {})
+                        stat_match = re.search(r"(\w+)\s*[<>=]+", cond)
+                        if stat_match and stat_match.group(1) in values:
+                            stat_val = values[stat_match.group(1)]
+                            actual = f"{stat_val:.2f}" if isinstance(stat_val, (int, float)) else str(stat_val)
+                            if metric_data.get("contains") == "time":
+                                actual += "ms"
+                        elif "value" in values:
+                            val_num = values["value"]
+                            actual = f"{val_num:.2f}" if isinstance(val_num, (int, float)) else str(val_num)
+                        elif "rate" in values:
+                            rate_val = values["rate"]
+                            if metric_data.get("type") == "rate":
+                                actual = f"{rate_val * 100:.2f}%"
+                            else:
+                                actual = f"{rate_val:.2f}"
+                        
+                        thresholds_data.append({
+                            "metric": metric_name,
+                            "condition": cond,
+                            "actual": actual,
+                            "status": status
+                        })
+        else:
+            for k, v in self.metrics.items():
+                if k.startswith("threshold"):
+                    parsed = MetricParser.parse_threshold(k, v)
+                    thresholds_data.append(parsed)
                 
         if thresholds_data:
             story.append(Spacer(1, 24))

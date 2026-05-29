@@ -21,6 +21,171 @@ from langchain_core.messages import HumanMessage, AIMessage
 from runner_agent.agent import RunnerAgent
 from runner_agent.tools import RunnerTools, extract_vus_from_script
 
+def format_test_metrics(metrics, run_id):
+    # Check if this is the new JSONB format
+    is_new_format = isinstance(metrics, dict) and "metrics" in metrics
+    
+    if not is_new_format:
+        # Fallback to the old format parsing
+        table_md = "| Metric | Result |\n|---|---|\n"
+        for key, val in metrics.items():
+            human_key = key.replace("_", " ").title()
+            clean_value = " ".join(str(val).split())
+            table_md += f"| **{human_key}** | {clean_value} |\n"
+        return f"**Test Execution Completed!** 🎉\n\n### Summary Metrics for run: `{run_id}`\n\n{table_md}"
+        
+    raw_metrics = metrics["metrics"]
+    state = metrics.get("state", {})
+    root_group = metrics.get("root_group", {})
+    
+    # 1. Extract KPIs
+    vus_max_val = "-"
+    if "vus_max" in raw_metrics:
+        vus_max_val = raw_metrics["vus_max"].get("values", {}).get("max", "-")
+    elif "vus" in raw_metrics:
+        vus_max_val = raw_metrics["vus"].get("values", {}).get("max", "-")
+        
+    total_reqs = "-"
+    reqs_rate = "-"
+    if "http_reqs" in raw_metrics:
+        reqs_vals = raw_metrics["http_reqs"].get("values", {})
+        total_reqs = f"{reqs_vals.get('count', '-'):,}" if isinstance(reqs_vals.get('count'), (int, float)) else str(reqs_vals.get('count', '-'))
+        rate_val = reqs_vals.get('rate')
+        reqs_rate = f"{rate_val:.2f}" if isinstance(rate_val, (int, float)) else str(rate_val)
+        
+    fail_rate_pct = "-"
+    fails_count = 0
+    if "http_req_failed" in raw_metrics:
+        fail_vals = raw_metrics["http_req_failed"].get("values", {})
+        rate_val = fail_vals.get("rate")
+        fail_rate_pct = f"{rate_val * 100:.2f}%" if isinstance(rate_val, (int, float)) else str(rate_val)
+        fails_count = fail_vals.get("passes", 0)
+        
+    avg_duration = "-"
+    if "http_req_duration" in raw_metrics:
+        duration_vals = raw_metrics["http_req_duration"].get("values", {})
+        avg_val = duration_vals.get("avg")
+        avg_duration = f"{avg_val:.2f} ms" if isinstance(avg_val, (int, float)) else str(avg_val)
+
+    # 2. Format Trend Metrics (Response Times)
+    trend_keys = ["http_req_duration", "http_req_waiting", "http_req_connecting", "iteration_duration"]
+    trend_rows = []
+    for tk in trend_keys:
+        if tk in raw_metrics:
+            vals = raw_metrics[tk].get("values", {})
+            contains_time = raw_metrics[tk].get("contains") == "time"
+            suffix = " ms" if contains_time else ""
+            
+            def fmt(v):
+                if v is None or v == "-": return "-"
+                return f"{v:.2f}{suffix}" if isinstance(v, (int, float)) else f"{v}{suffix}"
+                
+            trend_rows.append(
+                f"| **{tk}** | {fmt(vals.get('avg'))} | {fmt(vals.get('p(90)'))} | {fmt(vals.get('p(95)'))} | {fmt(vals.get('med'))} | {fmt(vals.get('min'))} | {fmt(vals.get('max'))} |"
+            )
+            
+    trend_table = ""
+    if trend_rows:
+        trend_table = (
+            "| Metric | Average | p(90) | p(95) | Median | Min | Max |\n"
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+            + "\n".join(trend_rows)
+        )
+        
+    # 3. Format Throughput (Counters)
+    counter_keys = ["data_received", "data_sent", "http_reqs", "iterations"]
+    counter_rows = []
+    for ck in counter_keys:
+        if ck in raw_metrics:
+            vals = raw_metrics[ck].get("values", {})
+            contains_data = raw_metrics[ck].get("contains") == "data"
+            count = vals.get("count", "-")
+            rate = vals.get("rate", "-")
+            
+            if contains_data and isinstance(count, (int, float)):
+                if count >= 1024 * 1024:
+                    count_str = f"{count / (1024 * 1024):.2f} MB"
+                elif count >= 1024:
+                    count_str = f"{count / 1024:.2f} kB"
+                else:
+                    count_str = f"{count} B"
+            else:
+                count_str = f"{count:,}" if isinstance(count, (int, float)) else str(count)
+                
+            if contains_data and isinstance(rate, (int, float)):
+                if rate >= 1024 * 1024:
+                    rate_str = f"{rate / (1024 * 1024):.2f} MB/s"
+                elif rate >= 1024:
+                    rate_str = f"{rate / 1024:.2f} kB/s"
+                else:
+                    rate_str = f"{rate:.2f} B/s"
+            else:
+                rate_str = f"{rate:.2f}/s" if isinstance(rate, (int, float)) else str(rate)
+                
+            counter_rows.append(f"*   **{ck.replace('_', ' ').title()}:** {count_str} ({rate_str})")
+            
+    throughput_section = "\n".join(counter_rows) if counter_rows else "No throughput metrics recorded."
+
+    # 4. Format Checks
+    checks_rows = []
+    if root_group:
+        def process_group(group, prefix=""):
+            for check in group.get("checks", []):
+                name = check.get("name", "check")
+                passes = check.get("passes", 0)
+                fails = check.get("fails", 0)
+                total = passes + fails
+                pct = (passes / total * 100) if total > 0 else 0.0
+                status_emoji = "✅" if fails == 0 else "⚠️"
+                checks_rows.append(f"*   {status_emoji} **{prefix}{name}:** `{pct:.2f}% passed` ({passes} passed, {fails} failed)")
+            for sub_group in group.get("groups", []):
+                sub_name = sub_group.get("name", "")
+                process_group(sub_group, prefix=f"{prefix}{sub_name} > ")
+                
+        process_group(root_group)
+            
+    checks_section = "\n".join(checks_rows) if checks_rows else "*None defined in test*"
+
+    thresholds_rows = []
+    for metric_name, metric_data in raw_metrics.items():
+        if isinstance(metric_data, dict) and "thresholds" in metric_data:
+            for cond, status_dict in metric_data["thresholds"].items():
+                ok = status_dict.get("ok", True)
+                status_str = "✅ Pass" if ok else "❌ Fail"
+                thresholds_rows.append(f"*   **{metric_name}** ({cond}): `{status_str}`")
+                
+    thresholds_section = ""
+    if thresholds_rows:
+        thresholds_section = "\n\n#### **🛡️ Thresholds**\n" + "\n".join(thresholds_rows)
+
+    duration_sec = state.get("testRunDurationMs", 0) / 1000.0 if "testRunDurationMs" in state else 0.0
+    duration_str = f"{duration_sec:.1f}s" if duration_sec > 0 else "Unknown"
+
+    summary_md = f"""### **Test Execution Completed!** 🎉
+**Run ID:** `{run_id}` | **Duration:** `{duration_str}`
+
+#### **📊 Key Performance Indicators (KPIs)**
+| Peak Users | Total Requests | Error Rate | Avg Response Time |
+| :---: | :---: | :---: | :---: |
+| **{vus_max_val} VUs** | **{total_reqs}** ({reqs_rate}/s) | **{fail_rate_pct}** ({fails_count} failed) | **{avg_duration}** |
+
+---
+
+#### **⏱️ Response Time Distribution (Trends)**
+{trend_table}
+
+---
+
+#### **📥 Throughput & Data Transfer**
+{throughput_section}
+
+---
+
+#### **✅ Test Checks**
+{checks_section}{thresholds_section}
+"""
+    return summary_md
+
 # Set up page config
 def render_ui():
     st.title("Runner Agent")
@@ -125,19 +290,8 @@ def render_ui():
                                     if isinstance(metrics, str):
                                         metrics = json.loads(metrics)
                                     
-                                    # Humanize the metrics into a Markdown table
-                                    table_md = "| Metric | Result |\n|---|---|\n"
-                                    for key, val in metrics.items():
-                                        # Capitalize keys and replace underscores
-                                        human_key = key.replace("_", " ").title()
-                                        
-                                        # Clean up multiple whitespaces in the value
-                                        clean_value = " ".join(str(val).split())
-                                        
-                                        table_md += f"| **{human_key}** | {clean_value} |\n"
-                                    
-                                    # Format nicely as Markdown
-                                    summary_md = f"**Test Execution Completed!** 🎉\n\n### Summary Metrics for run: `{run_id}`\n\n{table_md}"
+                                    # Format nicely as modern performance dashboard Markdown
+                                    summary_md = format_test_metrics(metrics, run_id)
                                     st.session_state.runner_messages.append({
                                         "role": "assistant", 
                                         "content": summary_md,

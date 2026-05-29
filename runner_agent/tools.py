@@ -391,17 +391,18 @@ random validations
 
 THRESHOLD RULES
 
-Allowed:
+Allowed Metrics & Supported Aggregation Methods:
 
-http_req_duration
-http_req_failed
-checks
-vus
-iterations
+- **http_req_duration** (trend): supports `avg`, `min`, `max`, `med`, `p(90)`, `p(95)`, `p(99)` etc. (e.g. 'p(95)<500')
+- **http_req_failed** (rate): supports `rate` (e.g. 'rate<0.01')
+- **checks** (rate): supports `rate` (e.g. 'rate>=0.95')
+- **vus** (gauge): supports `value`, `min`, `max` (e.g. 'value<100')
+- **iterations** (counter): supports ONLY `count` or `rate` (e.g. 'count>=100'). **NEVER apply max, min, avg, or percentiles on counter metrics (iterations, http_reqs, data_received, data_sent)!**
 
 Forbidden:
 
-http_status
+- http_status
+- max, min, avg, or percentiles applied on iterations or any other counter metric
 
 If user provides thresholds:
 
@@ -495,6 +496,9 @@ If invalid regenerate internally.
         # Programmatically fix any hallucinated invalid duration values (e.g. "s", "m", "h", "Xs") to "10s"
         import re
         script = re.sub(r'(["\'])(s|m|h|Xs|Xm|Xh|X)\1', r'\110s\1', script)
+        
+        # Programmatically fix invalid counter thresholds on iterations/counters
+        script = re.sub(r'(\biterations\b["\']?\s*:\s*\[\s*)(["\'])(?:max|min|avg|med|p\(\d+\))\s*([<>=]+)\s*(\d+)(["\'])', r'\1\2count\3\4\5', script)
             
         return script
 
