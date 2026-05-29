@@ -1,10 +1,34 @@
 import json
 import os
+import re
 from typing import Optional
 
 import requests
 from langchain_core.tools import StructuredTool
 from langchain_groq import ChatGroq
+
+def extract_vus_from_script(script: str) -> int:
+    """Extracts the maximum/total VUs defined in the k6 script."""
+    if not script:
+        return 1
+    
+    # Extract common VU indicators:
+    # vus: 10, preAllocatedVUs: 10, maxVUs: 10, target: 10
+    vus_matches = re.findall(r"\bvus\s*:\s*(\d+)", script)
+    target_matches = re.findall(r"\btarget\s*:\s*(\d+)", script)
+    preallocated_matches = re.findall(r"\bpreAllocatedVUs\s*:\s*(\d+)", script)
+    max_vus_matches = re.findall(r"\bmaxVUs\s*:\s*(\d+)", script)
+    
+    all_values = []
+    for m in vus_matches + target_matches + preallocated_matches + max_vus_matches:
+        try:
+            all_values.append(int(m))
+        except ValueError:
+            pass
+            
+    if all_values:
+        return max(all_values)
+    return 1
 
 class RunnerTools:
     """Encapsulates tool logic for generating and executing k6 scripts."""
@@ -482,9 +506,9 @@ If invalid regenerate internally.
         endpoint = os.getenv("RUNNER_TRIGGER_URL", "http://localhost:8081/run-test").strip()
         
         try:
-            vus_val = int(vus) if vus else 1
+            vus_val = int(vus) if vus else extract_vus_from_script(script)
         except Exception:
-            vus_val = 1
+            vus_val = extract_vus_from_script(script)
             
         payload = {"vus": vus_val, "script": script}
         if run_id:

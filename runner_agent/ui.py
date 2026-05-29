@@ -19,7 +19,7 @@ if root_dir not in sys.path:
 
 from langchain_core.messages import HumanMessage, AIMessage
 from runner_agent.agent import RunnerAgent
-from runner_agent.tools import RunnerTools
+from runner_agent.tools import RunnerTools, extract_vus_from_script
 
 # Set up page config
 def render_ui():
@@ -86,9 +86,9 @@ def render_ui():
 
     def stream_test_execution(script, vus, run_id):
         try:
-            vus_val = int(vus) if vus else 1
+            vus_val = int(vus) if vus else extract_vus_from_script(script)
         except Exception:
-            vus_val = 1
+            vus_val = extract_vus_from_script(script)
             
         payload = {"vus": vus_val, "script": script, "run_id": run_id}
         endpoint = os.getenv("RUNNER_TRIGGER_URL", "http://localhost:8081/run-test").strip()
@@ -314,7 +314,7 @@ def render_ui():
             })
             
             st.session_state.runner_pending_script = formatted_script
-            st.session_state.runner_pending_vus = 1  # Default fallback
+            st.session_state.runner_pending_vus = extract_vus_from_script(formatted_script)
             st.session_state.runner_is_manual_script = True
             st.rerun()
         else:
@@ -347,7 +347,7 @@ def render_ui():
                             script_generated = True
                             st.session_state.runner_pending_script = observation
                             st.session_state.runner_is_manual_script = False
-                            st.session_state.runner_pending_vus = action.tool_input.get("vus", None)
+                            st.session_state.runner_pending_vus = extract_vus_from_script(observation)
                             
                     if script_generated:
                         st.session_state.runner_messages.append({
