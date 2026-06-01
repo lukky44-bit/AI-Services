@@ -303,7 +303,7 @@ def stream_test_execution(script, vus, run_id):
 
 
 # --- STREAMLIT PAGE SETUP ---
-st.set_page_config(page_title="AI Orchestrator Dashboard", layout="wide", page_icon="🔮")
+st.set_page_config(page_title="AI Driven Performance Testing", layout="wide", page_icon="🔮")
 
 # Inject Custom High-Fidelity CSS styling
 st.markdown(
@@ -459,7 +459,7 @@ st.markdown(
 st.markdown(
     """
     <div class="header-container">
-        <h1 style="color: #f8fafc; font-family: 'Outfit', sans-serif; font-size: 2.2rem; margin: 0; font-weight: 800;">🔮 AI Performance Testing Orchestrator</h1>
+        <h1 style="color: #f8fafc; font-family: 'Outfit', sans-serif; font-size: 2.2rem; margin: 0; font-weight: 800;">🔮 AI Driven Performance Testing</h1>
         <p style="color: #cbd5e1; font-family: 'Inter', sans-serif; font-size: 0.95rem; margin-top: 6px; margin-bottom: 0; font-weight: 300;">
             A unified interface that coordinates automated k6 execution and advanced postgres performance metrics analysis.
         </p>
@@ -500,33 +500,15 @@ if "runner_waiting_for_manual_script" not in st.session_state:
     st.session_state.runner_waiting_for_manual_script = False
 
 
-# --- SIDEBAR DIAGNOSTICS & SYSTEM STATUS ---
-with st.sidebar:
-    st.image("https://img.icons8.com/nolan/96/artificial-intelligence.png", width=70)
-    st.title("System Center")
-    
-    st.markdown("### 📋 Platform Health")
-    db_connected = check_db_connection()
-    if db_connected:
-        st.success("Postgres DB Connection: OK 🟢")
-    else:
-        st.error("Postgres DB Connection: Failed 🔴")
-        
-    st.markdown("### 🤖 Configured Agents")
-    st.info("🔮 **Orchestrator (Router)**\nStatus: Online 🟢")
-    st.info("📊 **DB Analyst Agent**\nStatus: Ready 🟢")
-    st.info("🏃‍♂️ **Runner Agent**\nStatus: Ready 🟢")
-    
-    st.markdown("---")
-    st.markdown("### 🛠️ Quick Diagnostics")
-    
-    if st.button("Reset Conversation History", use_container_width=True):
+# --- INLINE UTILITY TOOLBAR ---
+col_space, col_action = st.columns([8.2, 1.8])
+with col_action:
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.orchestrator_messages = []
         st.session_state.runner_pending_script = None
         st.session_state.runner_test_running = False
         st.session_state.runner_run_id = None
         st.session_state.runner_test_status = None
-        st.success("Session state successfully cleared!")
         st.rerun()
 
 # --- MAIN CONVERSATION INTERFACE ---
