@@ -318,17 +318,6 @@ st.markdown(
             font-family: 'Inter', sans-serif;
         }
         
-        /* Dark Slate Sidebar */
-        section[data-testid="stSidebar"] {
-            background-color: #0f172a !important;
-            border-right: 1px solid #1e293b;
-        }
-        
-        section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
-            color: #f8fafc !important;
-            font-family: 'Outfit', sans-serif;
-        }
-        
         /* Modern Header Banner */
         .header-container {
             text-align: center;
@@ -359,6 +348,17 @@ st.markdown(
             padding: 10px 14px;
             margin-bottom: 12px;
             box-shadow: 0 4px 12px rgba(6, 182, 212, 0.25);
+            font-family: 'Outfit', sans-serif;
+            color: #ffffff;
+        }
+        
+        .routing-badge-rag {
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            border: 1px solid #6366f1;
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 12px;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
             font-family: 'Outfit', sans-serif;
             color: #ffffff;
         }
@@ -468,6 +468,17 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# --- INLINE UTILITY TOOLBAR ---
+col_space, col_action = st.columns([8.2, 1.8])
+with col_action:
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        st.session_state.orchestrator_messages = []
+        st.session_state.runner_pending_script = None
+        st.session_state.runner_test_running = False
+        st.session_state.runner_run_id = None
+        st.session_state.runner_test_status = None
+        st.rerun()
+
 # --- SESSION STATE INITIALIZATION ---
 if "orchestrator_messages" not in st.session_state:
     st.session_state.orchestrator_messages = []
@@ -499,18 +510,6 @@ if "runner_test_success" not in st.session_state:
 if "runner_waiting_for_manual_script" not in st.session_state:
     st.session_state.runner_waiting_for_manual_script = False
 
-
-# --- INLINE UTILITY TOOLBAR ---
-col_space, col_action = st.columns([8.2, 1.8])
-with col_action:
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.orchestrator_messages = []
-        st.session_state.runner_pending_script = None
-        st.session_state.runner_test_running = False
-        st.session_state.runner_run_id = None
-        st.session_state.runner_test_status = None
-        st.rerun()
-
 # --- MAIN CONVERSATION INTERFACE ---
 chat_container = st.container(height=520)
 
@@ -537,6 +536,13 @@ with chat_container:
                         <div class="badge-reason">{reasoning}</div>
                     </div>
                     """
+                elif route_type == "rag_agent":
+                    badge_html = f"""
+                    <div class="routing-badge-rag">
+                        <div class="badge-title">📚 Routed to K6 Expert (RAG) Agent</div>
+                        <div class="badge-reason">{reasoning}</div>
+                    </div>
+                    """
                 else:
                     badge_html = f"""
                     <div class="routing-badge-direct">
@@ -549,6 +555,17 @@ with chat_container:
             # Render message markdown content
             st.markdown(msg["content"])
             
+            # Render references and sources if available
+            if "sources" in msg and msg["sources"]:
+                st.markdown("<div style='margin-top: 12px; font-size: 0.8rem; color: #94a3b8; font-weight: 600;'>📚 References & Sources:</div>", unsafe_allow_html=True)
+                sources_html = ""
+                for src in msg["sources"]:
+                    basename = src.split("/")[-1] if "/" in src else src
+                    if not basename.strip():
+                        basename = src
+                    sources_html += f'<a href="{src}" target="_blank" style="text-decoration:none;"><span style="background-color: #1e293b; border: 1px solid #334155; padding: 4px 10px; border-radius: 6px; color: #38bdf8; display: inline-block; margin-right: 8px; margin-bottom: 6px; font-size: 0.75rem; font-weight: 500; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">📖 {basename} ↗</span></a>'
+                st.markdown(f"<div style='margin-top: 6px;'>{sources_html}</div>", unsafe_allow_html=True)
+                
             # Sub-agent specialized inline content (Grafana Dashboards & PDF Download)
             if "run_id" in msg:
                 grafana_url = f"http://localhost:3000/d/k6-live-overview/k6-live-overview?orgId=1&from=now-1h&to=now&timezone=browser&var-test_run_id={msg['run_id']}&refresh=5s"
@@ -794,6 +811,12 @@ if send_btn and query_input:
                         if "at: " in str(observation):
                             pdf_path = str(observation).split("at: ")[1].strip()
                             
+                # Check for sources in additional_kwargs
+                sources = None
+                first_msg = response["messages"][0]
+                if hasattr(first_msg, "additional_kwargs") and first_msg.additional_kwargs and "sources" in first_msg.additional_kwargs:
+                    sources = first_msg.additional_kwargs["sources"]
+                    
                 # Package response
                 msg_payload = {
                     "role": "assistant",
@@ -807,6 +830,9 @@ if send_btn and query_input:
                     
                 if pdf_path:
                     msg_payload["pdf_path"] = pdf_path
+                    
+                if sources:
+                    msg_payload["sources"] = sources
                     
                 st.session_state.orchestrator_messages.append(msg_payload)
             except Exception as router_err:

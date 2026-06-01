@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import asyncio
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -16,19 +17,21 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from db_analyst_agent.agent import DBAnalystAgent
 from runner_agent.agent import RunnerAgent
+from rag_agent.agent import K6ExpertAgent
 
 load_dotenv()
 
 class OrchestratorAgent:
     """
     Core orchestrator agent that receives conversation history, analyzes intent,
-    routes to DB Analyst or Runner Agent, or handles general conversation directly.
+    routes to DB Analyst, Runner, or K6 Expert (RAG) Agent, or handles direct conversation.
     """
     
     def __init__(self):
         # Initialize specialized sub-agents
         self.db_agent = DBAnalystAgent()
         self.runner_agent = RunnerAgent()
+        self.rag_agent = K6ExpertAgent()
         
         # Load environment-specific LLM parameters
         model_name = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
@@ -39,19 +42,22 @@ class OrchestratorAgent:
         
     def classify_intent(self, messages: list) -> dict:
         """
-        Examines the conversation logs (especially the latest human query) to identify
-        whether the request relates to the database agent, load testing runner agent,
-        or is a direct greeting/system capability explanation.
+        Examines the conversation logs to identify whether the request relates to:
+        - db_agent (Database Analyst)
+        - runner_agent (Test Runner)
+        - rag_agent (K6 Expert RAG)
+        - direct (Greetings / General assistance)
         """
         system_prompt = (
             "You are the Router/Orchestrator for an AI-driven performance testing platform.\n"
-            "Your job is to analyze the user's latest query along with the conversation history and classify the intent into one of three routes:\n"
+            "Your job is to analyze the user's latest query along with the conversation history and classify the intent into one of four routes:\n"
             "1. 'runner_agent': If the user wants to write, generate, modify, execute, stream, monitor, or stop a k6 load test script.\n"
             "2. 'db_agent': If the user wants to query test runs, view database tables/metrics, inspect completed tests, compare run results, or generate PDF/summary reports of runs.\n"
-            "3. 'direct': If the user's query is a general greeting (e.g. hello, hi, how are you), a request for help/guidance, system capability questions, or general chit-chat.\n\n"
+            "3. 'rag_agent': If the user has a technical or syntax question about k6 documentation, APIs, options, best practices, or custom configuration (e.g. how to write checks or configure threshold metrics).\n"
+            "4. 'direct': If the user's query is a general greeting (e.g. hello, hi, how are you), a request for help/guidance on using the platform, or general chit-chat.\n\n"
             "Return a JSON object exactly matching this schema:\n"
             "{\n"
-            "  \"route\": \"runner_agent\" | \"db_agent\" | \"direct\",\n"
+            "  \"route\": \"runner_agent\" | \"db_agent\" | \"rag_agent\" | \"direct\",\n"
             "  \"reason\": \"A brief 1-sentence reason explaining why you routed the query this way.\"\n"
             "}\n\n"
             "Output ONLY valid raw JSON. Do not include markdown code block formatting (like ```json)."
@@ -80,7 +86,7 @@ class OrchestratorAgent:
             
             data = json.loads(content)
             
-            if data.get("route") not in ["runner_agent", "db_agent", "direct"]:
+            if data.get("route") not in ["runner_agent", "db_agent", "rag_agent", "direct"]:
                 data["route"] = "direct"
                 data["reason"] = "Classification returned invalid route. Defaulting to orchestrator direct."
             return data
@@ -123,14 +129,29 @@ class OrchestratorAgent:
             res["reason"] = reason
             return res
             
+        elif route == "rag_agent":
+            # Invoke RAG agent asynchronously in a new event loop
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                res = loop.run_until_complete(self.rag_agent.invoke({"messages": messages}))
+                loop.close()
+            except Exception:
+                res = asyncio.run(self.rag_agent.invoke({"messages": messages}))
+                
+            res["route"] = "rag_agent"
+            res["reason"] = reason
+            return res
+            
         else:
             # Handle directly
             direct_system = (
                 "You are the Orchestrator for the AI performance testing platform.\n"
                 "You are talking to the user. Explain system capabilities if asked. "
-                "The system has two specialized sub-agents:\n"
+                "The system has three specialized sub-agents:\n"
                 "1. Database Analyst Agent (db_agent): Can query test summaries, run customized SQL queries on metrics, and generate PDF summary reports.\n"
-                "2. Runner Agent (runner_agent): Can generate k6 load testing scripts, execute load tests in real-time, stream performance logs, and stop active executions.\n\n"
+                "2. Runner Agent (runner_agent): Can generate k6 load testing scripts, execute load tests in real-time, stream performance logs, and stop active executions.\n"
+                "3. K6 Expert Agent (rag_agent): Can answer technical questions about k6 scripting, options, API, best practices, and documentation queries using a semantic search engine.\n\n"
                 "Introduce yourself briefly and orient the user. Be helpful, professional, and friendly."
             )
             chat_messages = [SystemMessage(content=direct_system)] + messages
