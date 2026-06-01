@@ -873,7 +873,7 @@ Based on the performance test results:
 
         # 5. Append SRE Header Flow
         story.append(Paragraph("Advanced SRE Analysis Report", analysis_title_style))
-        story.append(Paragraph(f"<b>Run ID:</b> {self.run_id} | <b>Jio Finance Platform Service Limited</b>", subtitle_style))
+        story.append(Paragraph(f"<b>Run ID:</b> {self.run_id}", subtitle_style))
         story.append(Spacer(1, 10))
         
         # 6. Append analytical sections and convert bullets & bolding dynamically
