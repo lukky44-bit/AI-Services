@@ -303,16 +303,16 @@ Your job is to analyze k6 performance test results and write a highly profession
 
 You must output a structured analysis with EXACTLY four sections. Do NOT output any introductory or concluding conversational filler. Just start directly with the markdown headers:
 
-### 10. Error Analysis
+### 1. Error Analysis
 [Provide a thorough analysis of any errors, warnings, failed checks, or connection timeouts found in the logs or metrics. Quantify the error rate and identify when they occurred.]
 
-### 11. Root Cause
+### 2. Root Cause
 [Perform a deep dive logical analysis explaining WHY these failures or duration spikes occurred based on the provided logs, metrics anomalies, and test parameters (like VUs scaling or endpoints).]
 
-### 12. Final Recommendations
+### 3. Final Recommendations
 [Give concrete, actionable, and specific architectural or database optimization recommendations to resolve the identified bottlenecks and errors.]
 
-### 13. Conclusion
+### 4. Conclusion
 [Synthesize the overall performance test results. Provide a final verdict on whether the system passed or failed its performance objectives, and summarize the next steps.]
 
 IMPORTANT INSTRUCTION FOR SUB-SECTIONS FORMATTING:
@@ -343,13 +343,13 @@ Here is the performance test data for Run ID: {self.run_id}
         except Exception as e:
             # Fallback mock template if LLM is unavailable or fails due to network
             return f"""
-### 10. Error Analysis
+### 1. Error Analysis
 Error Observed During High Load:
 ● Network/Connection Errors (Status 0) - hard connection resets/timeouts.
 ● Application Errors (Session not found) - session cache mismatches.
 ● Infrastructure Errors (503 Service Unavailable) - gateway routing connectivity issues.
 
-### 11. Root Cause
+### 2. Root Cause
 1. Network/Connection Errors (Status 0)
 ● Pattern: Result-Status 0
 ● Likely Cause: These are typically client-side timeouts or hard connection failures where the gateway server terminated connections prematurely.
@@ -357,7 +357,7 @@ Error Observed During High Load:
 ● Pattern: body="event: error\\ndata: {{\\\"error\\\": \\\"Session not found\\\"}}"
 ● Cause: Successful HTTP requests (200 OK) that return an error event inside the active stream.
 
-### 12. Final Recommendations
+### 3. Final Recommendations
 1. Advanced Connection Management (Addressing Status 0)
 ● Keep-Alive Tuning: Adjust TCP keep-alive settings and increase idle timeouts.
 2. Session Persistence & State Management (Addressing "Session Not Found")
@@ -365,7 +365,7 @@ Error Observed During High Load:
 ● Distributed Session Store: Transition from in-memory session management to Redis.
 3. Database connection pooling: Deploy PgBouncer to prevent database thread spikes under high load.
 
-### 13. Conclusion
+### 4. Conclusion
 Based on the performance test results:
 ● The system suffered from a cascading load spike failure where gateway infrastructure connection resets fed into session lookup mismatches. Moving from standard local caches to sticky gateway affinity and pgBouncer pooling is required to maintain system stability.
 """
@@ -851,17 +851,17 @@ Based on the performance test results:
         
         # 4. Parse output sections dynamically using Regex
         analysis_sections = {
-            "10. Error Analysis": "",
-            "11. Root Cause": "",
-            "12. Final Recommendations": "",
-            "13. Conclusion": ""
+            "1. Error Analysis": "",
+            "2. Root Cause": "",
+            "3. Final Recommendations": "",
+            "4. Conclusion": ""
         }
         
         patterns = {
-            "10. Error Analysis": r"###\s*10\.\s*Error\s*Analysis\s*\n(.*?)(?=###|$)",
-            "11. Root Cause": r"###\s*11\.\s*Root\s*Cause\s*\n(.*?)(?=###|$)",
-            "12. Final Recommendations": r"###\s*12\.\s*Final\s*Recommendations\s*\n(.*?)(?=###|$)",
-            "13. Conclusion": r"###\s*13\.\s*Conclusion\s*\n(.*?)(?=###|$)"
+            "1. Error Analysis": r"###\s*1\.\s*Error\s*Analysis\s*\n(.*?)(?=###|$)",
+            "2. Root Cause": r"###\s*2\.\s*Root\s*Cause\s*\n(.*?)(?=###|$)",
+            "3. Final Recommendations": r"###\s*3\.\s*Final\s*Recommendations\s*\n(.*?)(?=###|$)",
+            "4. Conclusion": r"###\s*4\.\s*Conclusion\s*\n(.*?)(?=###|$)"
         }
         
         for name, pattern in patterns.items():
