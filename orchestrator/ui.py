@@ -5,7 +5,18 @@ import requests
 import threading
 import time
 import base64
+import logging
+import warnings
 import streamlit as st
+
+# Suppress noisy warnings and INFO logs
+warnings.filterwarnings("ignore")
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_EXPERIMENTAL_WARNING"] = "1"
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 # Ensure parent and root directories are in sys.path to resolve subagent modules

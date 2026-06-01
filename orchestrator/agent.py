@@ -1,8 +1,12 @@
 import os
 import sys
 import json
+import logging
 import asyncio
 import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", module="langchain")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # Ensure parent directory is in sys.path to resolve subagent modules
