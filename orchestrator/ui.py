@@ -729,19 +729,22 @@ with chat_container:
 
     # 3. Dismiss Completed Execution Dialog
     elif st.session_state.runner_run_id and st.session_state.runner_test_status and "Workflow status: Completed" in st.session_state.runner_test_status:
-        with st.chat_message("assistant"):
-            if st.session_state.get("runner_test_success", True):
-                st.success("Test Run Executed Successfully!")
-                st.code(st.session_state.runner_test_status, language="json")
-            else:
+        if st.session_state.get("runner_test_success", True):
+            # Silently auto-clear states on success
+            st.session_state.runner_run_id = None
+            st.session_state.runner_test_status = None
+            st.session_state.runner_test_success = None
+            st.rerun()
+        else:
+            with st.chat_message("assistant"):
                 st.error("Test Run Execution Interrupted/Failed!")
                 st.code(st.session_state.runner_test_status, language="text")
                 
-            if st.button("Clear Notification"):
-                st.session_state.runner_run_id = None
-                st.session_state.runner_test_status = None
-                st.session_state.runner_test_success = None
-                st.rerun()
+                if st.button("Clear Notification"):
+                    st.session_state.runner_run_id = None
+                    st.session_state.runner_test_status = None
+                    st.session_state.runner_test_success = None
+                    st.rerun()
 
 # --- INPUT AND FORMS CONTROL ---
 st.markdown("---")

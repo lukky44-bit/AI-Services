@@ -306,7 +306,7 @@ You must output a structured analysis with EXACTLY four sections. Do NOT output 
 ### 1. Error Analysis
 [Provide a thorough analysis of any errors, warnings, failed checks, or connection timeouts found in the logs or metrics. Quantify the error rate and identify when they occurred.]
 
-### 2. Root Cause
+### 2. Observation
 [Perform a deep dive logical analysis explaining WHY these failures or duration spikes occurred based on the provided logs, metrics anomalies, and test parameters (like VUs scaling or endpoints).]
 
 ### 3. Final Recommendations
@@ -317,7 +317,7 @@ You must output a structured analysis with EXACTLY four sections. Do NOT output 
 
 IMPORTANT INSTRUCTION FOR SUB-SECTIONS FORMATTING:
 - Error Analysis should list bullets of observed errors (Network/Connection errors, Application errors, Infrastructure errors).
-- Root Cause must explicitly explain specific failure patterns (e.g. status 0 representing client timeouts, 503 Service Unavailable representing Envoy/gateway upstream resets, body="Session not found" in SSE streams, and silent 500 session initialization failures).
+- Observation must explicitly explain specific failure patterns (e.g. status 0 representing client timeouts, 503 Service Unavailable representing Envoy/gateway upstream resets, body="Session not found" in SSE streams, and silent 500 session initialization failures).
 - Final Recommendations must include numbered items (e.g. 1. Advanced Connection Management, 2. Session Persistence sticky affinity/Redis cache, 3. Gateway resilience Istio outlier circuit breaker, 4. Observability tracing and standardized log levels, 5. Database read/write splitting and PgBouncer connection pooling).
 - The overall SRE analysis must sound highly expert, thorough, authoritative, and closely model standard performance analysis standards.
 """
@@ -349,7 +349,7 @@ Error Observed During High Load:
 ● Application Errors (Session not found) - session cache mismatches.
 ● Infrastructure Errors (503 Service Unavailable) - gateway routing connectivity issues.
 
-### 2. Root Cause
+### 2. Observation
 1. Network/Connection Errors (Status 0)
 ● Pattern: Result-Status 0
 ● Likely Cause: These are typically client-side timeouts or hard connection failures where the gateway server terminated connections prematurely.
@@ -439,9 +439,9 @@ Based on the performance test results:
         
         story = []
         
-        # 1. Page Header (Title + Left Gray Vertical Bar)
+        # 1. Page Header
         header_text = [
-            Paragraph("Performance Test Summary", title_style),
+            Paragraph("Performance Test", title_style),
             Spacer(1, 4),
             Paragraph(f"<b>Test Run ID:</b> {self.run_id}", subtitle_style),
             Spacer(1, 4),
@@ -453,7 +453,7 @@ Based on the performance test results:
             colWidths=[4, 536]
         )
         header_table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (0,0), colors.HexColor('#BDC3C7')), # Vertical line
+            ('BACKGROUND', (0,0), (0,0), colors.HexColor('#2980B9')), # vertical line
             ('VALIGN', (0,0), (-1,-1), 'TOP'),
             ('LEFTPADDING', (1,0), (1,0), 10),
             ('RIGHTPADDING', (0,0), (-1,-1), 0),
@@ -461,7 +461,71 @@ Based on the performance test results:
             ('BOTTOMPADDING', (0,0), (-1,-1), 0),
         ]))
         story.append(header_table)
+        story.append(Spacer(1, 10))
+        
+        hr = Table([['']], colWidths=[540])
+        hr.setStyle(TableStyle([
+            ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+        ]))
+        story.append(hr)
+        story.append(Spacer(1, 20))
+        
+        # 1.5. Test Details Table
+        date_str, executor_str, vus_str = "-", "-", "-"
+        try:
+            db = DatabaseManager()
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT created_at, executor, vus FROM test_runs WHERE id = %s;", (self.run_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                created_at, executor, vus = row
+                if hasattr(created_at, 'strftime'):
+                    date_str = created_at.strftime("%d %B %Y")
+                else:
+                    date_str = str(created_at).split()[0] if created_at else "-"
+                executor_str = str(executor) if executor else "ramping-arrival-rate"
+                vus_str = f"{vus:,}" if vus else "-"
+        except Exception:
+            pass
+            
+        details_data = [
+            [
+                Paragraph("<b>Date</b>", cell_data_style), Paragraph(date_str, cell_data_style),
+                Paragraph("<b>Max VUs Tested</b>", cell_data_style), Paragraph(vus_str, cell_data_style)
+            ],
+            [
+                Paragraph("<b>Executor</b>", cell_data_style), Paragraph(executor_str, cell_data_style),
+                Paragraph("<b>Tool</b>", cell_data_style), Paragraph("k6", cell_data_style)
+            ]
+        ]
+        
+        details_table = Table(details_data, colWidths=[60, 208, 100, 168])
+        details_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8F9F9')),
+            ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 8),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(details_table)
         story.append(Spacer(1, 24))
+        
+        main_subheader_style = ParagraphStyle(
+            name='MainSubheaderStyle',
+            fontName='Helvetica-Oblique',
+            fontSize=16,
+            textColor=colors.HexColor('#2C3E50'),
+            leading=20,
+            spaceAfter=12
+        )
+        story.append(Paragraph("<i>Performance Summary</i>", main_subheader_style))
+        story.append(Spacer(1, 10))
         
         # 2. Trends Section
         story.append(Paragraph("Trends", section_style))
@@ -493,12 +557,13 @@ Based on the performance test results:
             colWidths=[130, 58, 58, 58, 58, 60, 60, 60]
         )
         trends_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
             ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
-            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#BDC3C7')),
+            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
             ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('TOPPADDING', (0,0), (-1,-1), 6),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 8),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
             ('LEFTPADDING', (0,0), (-1,-1), 6),
             ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ]))
@@ -811,7 +876,7 @@ Based on the performance test results:
             ]))
             story.append(thresholds_table)
             
-        # --- Page 2: Advanced SRE Analysis Sections (Error Analysis, Root Cause, Recommendations, Conclusion) ---
+        # --- Page 2: Advanced SRE Analysis Sections (Error Analysis, Observation, Recommendations, Conclusion) ---
         # 1. Custom Typography Styles for SRE Page
         analysis_title_style = ParagraphStyle(
             name='AnalysisTitleStyle',
@@ -852,14 +917,14 @@ Based on the performance test results:
         # 4. Parse output sections dynamically using Regex
         analysis_sections = {
             "1. Error Analysis": "",
-            "2. Root Cause": "",
+            "2. Observation": "",
             "3. Final Recommendations": "",
             "4. Conclusion": ""
         }
         
         patterns = {
             "1. Error Analysis": r"###\s*1\.\s*Error\s*Analysis\s*\n(.*?)(?=###|$)",
-            "2. Root Cause": r"###\s*2\.\s*Root\s*Cause\s*\n(.*?)(?=###|$)",
+            "2. Observation": r"###\s*2\.\s*Observation\s*\n(.*?)(?=###|$)",
             "3. Final Recommendations": r"###\s*3\.\s*Final\s*Recommendations\s*\n(.*?)(?=###|$)",
             "4. Conclusion": r"###\s*4\.\s*Conclusion\s*\n(.*?)(?=###|$)"
         }
@@ -872,9 +937,17 @@ Based on the performance test results:
                 analysis_sections[name] = "No deep-dive analysis compiled for this section."
 
         # 5. Append SRE Header Flow
-        story.append(Paragraph("Advanced SRE Analysis Report", analysis_title_style))
-        story.append(Paragraph(f"<b>Run ID:</b> {self.run_id}", subtitle_style))
+        story.append(Paragraph("<i>Advanced Analysis</i>", main_subheader_style))
         story.append(Spacer(1, 10))
+        
+        hr2 = Table([['']], colWidths=[540])
+        hr2.setStyle(TableStyle([
+            ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+        ]))
+        story.append(hr2)
+        story.append(Spacer(1, 15))
         
         # 6. Append analytical sections and convert bullets & bolding dynamically
         for name, content in analysis_sections.items():
