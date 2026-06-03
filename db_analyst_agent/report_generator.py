@@ -196,7 +196,7 @@ class MetricParser:
         }
 
 
-class PDFReportBuilder:
+class   PDFReportBuilder:
     """Uses ReportLab to draw a beautifully formatted PDF report matching the reference design."""
     
     def __init__(self, run_id: str, metrics: dict):
