@@ -336,26 +336,51 @@ stages:[
 ARRIVAL RATE RULES
 
 For:
-
 constant-arrival-rate
-ramping-arrival-rate
 
 Always include:
-
+rate
+timeUnit
+duration
 preAllocatedVUs
 
 Optionally include:
-
 maxVUs
 
-Example:
+For:
+ramping-arrival-rate
 
+Always include:
+startRate
+timeUnit
+preAllocatedVUs
+stages (array of {target, duration})
+
+Optionally include:
+maxVUs
+
+CRITICAL: Never use these properties for ramping-arrival-rate:
+startRPS
+maxRPS
+duration (at the root of the scenario)
+
+Example constant-arrival-rate:
 executor:"constant-arrival-rate"
 rate:100
 timeUnit:"1s"
 duration:"2m"
 preAllocatedVUs:20
 maxVUs:200
+
+Example ramping-arrival-rate:
+executor:"ramping-arrival-rate"
+startRate:5
+timeUnit:"1s"
+preAllocatedVUs:10
+maxVUs:100
+stages:[
+  { target: 50, duration: "1m" }
+]
 
 Never use:
 

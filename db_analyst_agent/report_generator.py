@@ -3,7 +3,7 @@ import re
 import json
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from .database import DatabaseManager
 from .config import Config
@@ -208,6 +208,20 @@ class   PDFReportBuilder:
             self.metrics = metrics["metrics"]
         else:
             self.metrics = metrics
+            
+        # Fetch the k6 script from database
+        self.script = ""
+        try:
+            db = DatabaseManager()
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT script FROM test_runs WHERE id = %s;", (self.run_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                self.script = row[0]
+        except Exception:
+            pass
         
         # Strip duplicated "run_" prefix if present in the run_id to avoid double naming
         clean_run_id = run_id[4:] if run_id.startswith("run_") else run_id
@@ -293,6 +307,119 @@ class   PDFReportBuilder:
         except Exception as db_e:
             return f"Database Fetch Error: {db_e}", f"Database Fetch Error: {db_e}"
 
+    def fetch_tps_data(self):
+        """Fetches realtime metrics, aligns reqs and fail rate, and calculates TPS buckets."""
+        db = DatabaseManager()
+        try:
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            
+            # Fetch k6_http_reqs_total
+            cursor.execute(
+                "SELECT ts, value FROM realtime_metrics WHERE run_id = %s AND name = 'k6_http_reqs_total' ORDER BY ts ASC;",
+                (self.run_id,)
+            )
+            reqs = cursor.fetchall()
+            
+            # Fetch k6_http_req_failed_rate
+            cursor.execute(
+                "SELECT ts, value FROM realtime_metrics WHERE run_id = %s AND name = 'k6_http_req_failed_rate' ORDER BY ts ASC;",
+                (self.run_id,)
+            )
+            fails = cursor.fetchall()
+            conn.close()
+            
+            if not reqs:
+                return [], {}, False
+                
+            # Align failed rates with request counts using two-pointer
+            aligned = []
+            fail_idx = 0
+            for req_ts, req_val in reqs:
+                best_fail_val = 0.0
+                min_diff = float('inf')
+                while fail_idx < len(fails):
+                    fail_ts, fail_val = fails[fail_idx]
+                    diff = abs((fail_ts - req_ts).total_seconds())
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_fail_val = fail_val
+                        fail_idx += 1
+                    else:
+                        break
+                if fail_idx > 0:
+                    fail_idx -= 1
+                aligned.append((req_ts, req_val, best_fail_val))
+                
+            # Check if metrics are cumulative or raw event values (1.0 per request)
+            is_cumulative = False
+            if len(reqs) > 1:
+                max_val = max(r[1] for r in reqs)
+                if max_val > 5.0 and reqs[-1][1] >= reqs[0][1]:
+                    is_cumulative = True
+                    
+            if is_cumulative:
+                if len(reqs) < 2:
+                    return [], {}, False
+                tps_values = []
+                buckets = {}
+                for i in range(1, len(aligned)):
+                    ts_prev, req_prev, fail_prev = aligned[i-1]
+                    ts_curr, req_curr, fail_curr = aligned[i]
+                    
+                    diff_sec = (ts_curr - ts_prev).total_seconds()
+                    if diff_sec <= 0:
+                        continue
+                        
+                    diff_req = req_curr - req_prev
+                    if diff_req < 0:
+                        diff_req = 0.0
+                        
+                    tps = diff_req / diff_sec
+                    tps_values.append(tps)
+                    
+                    lower = (int(tps) // 10) * 10
+                    upper = lower + 9
+                    bucket_key = (lower, upper)
+                    
+                    failed_reqs = diff_req * fail_curr
+                    
+                    if bucket_key not in buckets:
+                        buckets[bucket_key] = {"requests": 0.0, "failed": 0.0}
+                    buckets[bucket_key]["requests"] += diff_req
+                    buckets[bucket_key]["failed"] += failed_reqs
+            else:
+                # Group raw events by 1-second window
+                tps_by_second = {}
+                for req_ts, req_val, fail_val in aligned:
+                    sec_ts = req_ts.replace(microsecond=0)
+                    if sec_ts not in tps_by_second:
+                        tps_by_second[sec_ts] = {"requests": 0.0, "failed": 0.0}
+                    tps_by_second[sec_ts]["requests"] += req_val
+                    tps_by_second[sec_ts]["failed"] += req_val * fail_val
+                
+                tps_values = []
+                buckets = {}
+                for sec_ts, data in tps_by_second.items():
+                    tps = data["requests"]
+                    tps_values.append(tps)
+                    
+                    lower = (int(tps) // 10) * 10
+                    upper = lower + 9
+                    bucket_key = (lower, upper)
+                    
+                    if bucket_key not in buckets:
+                        buckets[bucket_key] = {"requests": 0.0, "failed": 0.0}
+                    buckets[bucket_key]["requests"] += data["requests"]
+                    buckets[bucket_key]["failed"] += data["failed"]
+                    
+            if not tps_values:
+                return [], {}, False
+                
+            return tps_values, buckets, True
+        except Exception as e:
+            return [], {}, False
+
     def generate_analysis(self, preprocessed_logs, preprocessed_anomalies) -> str:
         """Invokes LLM with specific prompt templates to generate numbered deep-dive analysis blocks."""
         llm = ChatGroq(model=Config.LLM_MODEL, temperature=Config.LLM_TEMPERATURE)
@@ -370,6 +497,65 @@ Based on the performance test results:
 ● The system suffered from a cascading load spike failure where gateway infrastructure connection resets fed into session lookup mismatches. Moving from standard local caches to sticky gateway affinity and pgBouncer pooling is required to maintain system stability.
 """
 
+    def generate_test_setup_summary(self, script: str) -> str:
+        """Uses LLM to summarize the test script/configuration into a user-friendly paragraph."""
+        if not script:
+            return "No script details found for this run. The test was triggered using standard configuration options."
+        
+        llm = ChatGroq(model=Config.LLM_MODEL, temperature=Config.LLM_TEMPERATURE)
+        system_prompt = """
+You are a Senior Performance Analyst. 
+Analyze the provided k6 performance testing script and write a concise, user-friendly paragraph (3-4 sentences) summarizing:
+1. What target endpoint/URL the user wanted to test.
+2. The testing type/scenario (e.g. spike, load, stress, constant arrival rate).
+3. The load profile (VUs, rate, duration, stages).
+
+Make the tone professional and clear, explaining the test configuration as a natural language summary of the user's intent. Do not include any greeting, introductory text, or conversational filler.
+"""
+        user_prompt = f"k6 script:\n{script}"
+        try:
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ])
+            return response.content.strip()
+        except Exception as e:
+            return f"The test executed a k6 script targeting the configured endpoints using the specified workload settings. (LLM Summary fallback due to: {e})"
+
+    def generate_executive_verdict(self, executor: str, vus: str, date_str: str) -> str:
+        """Uses LLM to generate a user-friendly Executive Verdict and Key Takeaways based on the test metrics."""
+        llm = ChatGroq(model=Config.LLM_MODEL, temperature=Config.LLM_TEMPERATURE)
+        
+        metrics_summary = {}
+        for m in ["http_req_duration", "http_req_failed", "checks", "http_reqs"]:
+            if m in self.metrics:
+                metrics_summary[m] = self.metrics[m]
+                
+        system_prompt = """
+You are a Senior Performance Analyst. 
+Analyze the provided k6 test metrics and write a short, highly professional, user-friendly "Executive Verdict & Key Insights" section for a PDF report.
+Your output must contain:
+1. **Executive Verdict**: A 1-2 sentence summary of whether the test was successful, the peak load achieved, and if any performance issues or error spikes were observed.
+2. **Key Takeaways**: 2-3 bullet points highlighting key insights (e.g. average response times, error rates, stability thresholds, or database bottlenecks).
+
+Make it extremely readable and easy for a business stakeholder to understand. Do not include any greeting or conversational filler. Output raw text (using bullet points for takeaways).
+"""
+        user_prompt = f"""
+Run ID: {self.run_id}
+Executor: {executor}
+Max VUs: {vus}
+Date: {date_str}
+Metrics: {json.dumps(metrics_summary, indent=2)}
+"""
+        try:
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ])
+            return response.content.strip()
+        except Exception as e:
+            return f"Test completed with executor {executor} and max load of {vus} VUs. The system successfully handled the workload with no major bottlenecks. (LLM Insights generation failed: {e})"
+
     def build(self) -> str:
         # Use 0.5 inch margins (36 pt)
         doc = SimpleDocTemplate(
@@ -406,7 +592,10 @@ Based on the performance test results:
             fontSize=11,
             textColor=colors.HexColor('#2C3E50'),
             leading=15,
-            alignment=1 # Center-aligned for subheadings
+            alignment=1, # Center-aligned for subheadings
+            spaceBefore=12,
+            spaceAfter=8,
+            keepWithNext=True
         )
         
         cell_header_style = ParagraphStyle(
@@ -435,6 +624,46 @@ Based on the performance test results:
             name='CellDataCenter',
             parent=cell_data_style,
             alignment=1
+        )
+
+        sub_heading_left = ParagraphStyle(
+            name='SubHeadingLeft',
+            fontName='Helvetica-Bold',
+            fontSize=10,
+            textColor=colors.HexColor('#2C3E50'),
+            spaceBefore=12,
+            spaceAfter=6,
+            keepWithNext=True
+        )
+
+        analysis_header_style = ParagraphStyle(
+            name='AnalysisHeaderStyle',
+            fontName='Helvetica-Bold',
+            fontSize=11,
+            textColor=colors.HexColor('#2C3E50'),
+            leading=15,
+            spaceBefore=14,
+            spaceAfter=6,
+            keepWithNext=True
+        )
+        
+        analysis_text_style = ParagraphStyle(
+            name='AnalysisTextStyle',
+            fontName='Helvetica',
+            fontSize=9.0,
+            textColor=colors.HexColor('#34495E'),
+            leading=13,
+            spaceAfter=6
+        )
+
+        main_subheader_style = ParagraphStyle(
+            name='MainSubheaderStyle',
+            fontName='Helvetica-Oblique',
+            fontSize=16,
+            textColor=colors.HexColor('#2C3E50'),
+            leading=20,
+            spaceAfter=12,
+            keepWithNext=True
         )
         
         story = []
@@ -515,22 +744,240 @@ Based on the performance test results:
         ]))
         story.append(details_table)
         story.append(Spacer(1, 24))
+
+        # --- Page 1: Executive Summary Section ---
+        section_num = 1
         
-        main_subheader_style = ParagraphStyle(
-            name='MainSubheaderStyle',
-            fontName='Helvetica-Oblique',
-            fontSize=16,
-            textColor=colors.HexColor('#2C3E50'),
-            leading=20,
-            spaceAfter=12
-        )
-        story.append(Paragraph("<i>Performance Summary</i>", main_subheader_style))
-        story.append(Spacer(1, 10))
+        exec_header_elements = [
+            Paragraph(f"<i>{section_num}. Executive Summary</i>", main_subheader_style)
+        ]
+        hr_exec = Table([['']], colWidths=[540])
+        hr_exec.setStyle(TableStyle([
+            ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+        ]))
+        exec_header_elements.append(hr_exec)
+        story.append(KeepTogether(exec_header_elements))
+        story.append(Spacer(1, 15))
+        section_num += 1
+
+        # 2A. Setup Summary (LLM)
+        setup_summary_text = self.generate_test_setup_summary(self.script)
+        story.append(Paragraph(self.markdown_to_html(setup_summary_text), analysis_text_style))
+        story.append(Spacer(1, 12))
         
-        # 2. Trends Section
-        story.append(Paragraph("Trends", section_style))
-        story.append(Spacer(1, 8))
+        # Calculate TPS data
+        tps_values, buckets, tps_data_available = self.fetch_tps_data()
         
+        if not tps_data_available:
+            story.append(Paragraph("<b>Insufficient TPS Data</b>", ParagraphStyle(
+                name='NoTPSData',
+                fontName='Helvetica-Bold',
+                fontSize=10,
+                textColor=colors.HexColor('#C0392B'),
+                spaceAfter=15
+            )))
+            story.append(Spacer(1, 15))
+        else:
+            is_ramping = "ramping" in executor_str
+            
+            if not is_ramping:
+                try:
+                    parsed_reqs = MetricParser.parse_counter(self.metrics.get("http_reqs", {}))
+                    rate_str = parsed_reqs.get("rate", "")
+                    if "/s" in rate_str:
+                        avg_tps = float(rate_str.replace("/s", "").strip())
+                    elif rate_str and rate_str != "-":
+                        avg_tps = float(rate_str)
+                    else:
+                        avg_tps = sum(tps_values)/len(tps_values)
+                except Exception:
+                    avg_tps = sum(tps_values)/len(tps_values)
+                
+                if avg_tps <= 0 and tps_values:
+                    avg_tps = sum(tps_values)/len(tps_values)
+                
+                non_zero_tps = [t for t in tps_values if t > 0]
+                min_tps = min(non_zero_tps) if non_zero_tps else 0.0
+
+                table_headers = ["Metric", "Value"]
+                table_data = [
+                    [Paragraph(h, cell_header_style if i == 0 else cell_header_center) for i, h in enumerate(table_headers)],
+                    [Paragraph("Minimum TPS", cell_data_style), Paragraph(f"{min_tps:.2f}", cell_data_center)],
+                    [Paragraph("Average TPS", cell_data_style), Paragraph(f"{avg_tps:.2f}", cell_data_center)],
+                    [Paragraph("Maximum TPS", cell_data_style), Paragraph(f"{max(tps_values):.2f}", cell_data_center)]
+                ]
+                tps_table = Table(table_data, colWidths=[270, 270])
+                tps_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
+                    ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
+                    ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
+                    ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('TOPPADDING', (0,0), (-1,-1), 8),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+                    ('LEFTPADDING', (0,0), (-1,-1), 6),
+                    ('RIGHTPADDING', (0,0), (-1,-1), 6),
+                ]))
+                story.append(tps_table)
+                story.append(Spacer(1, 15))
+            else:
+                sorted_bucket_keys = sorted(buckets.keys())
+                
+                stable_upper = None
+                for lower, upper in sorted_bucket_keys:
+                    b_data = buckets[(lower, upper)]
+                    tot = b_data["requests"]
+                    fail = b_data["failed"]
+                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
+                    if err_rate < 5.0:
+                        stable_upper = upper
+                    else:
+                        break
+                stable_threshold = f"0-{stable_upper} TPS" if stable_upper is not None else "N/A"
+                
+                degradation_onset = "N/A"
+                for lower, upper in sorted_bucket_keys:
+                    b_data = buckets[(lower, upper)]
+                    tot = b_data["requests"]
+                    fail = b_data["failed"]
+                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
+                    if err_rate >= 5.0:
+                        degradation_onset = f"{lower} TPS"
+                        break
+                        
+                critical_point = "N/A"
+                for lower, upper in sorted_bucket_keys:
+                    b_data = buckets[(lower, upper)]
+                    tot = b_data["requests"]
+                    fail = b_data["failed"]
+                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
+                    if err_rate >= 20.0:
+                        critical_point = f"{lower}-{upper} TPS"
+                        break
+                        
+                peak_throughput = "N/A"
+                if sorted_bucket_keys:
+                    max_lower, max_upper = sorted_bucket_keys[-1]
+                    peak_throughput = f"{max_lower}-{max_upper} TPS"
+                    
+                card_title_style = ParagraphStyle(
+                    name='CardTitleStyle',
+                    fontName='Helvetica-Bold',
+                    fontSize=8,
+                    textColor=colors.HexColor('#7F8C8D'),
+                    leading=10,
+                    alignment=1
+                )
+                card_value_style = ParagraphStyle(
+                    name='CardValueStyle',
+                    fontName='Helvetica-Bold',
+                    fontSize=14,
+                    textColor=colors.HexColor('#2C3E50'),
+                    leading=18,
+                    alignment=1
+                )
+                
+                cards_data = [
+                    [
+                        Paragraph("Stable Threshold", card_title_style),
+                        Paragraph("Degradation Onset", card_title_style),
+                        Paragraph("Critical Point", card_title_style),
+                        Paragraph("Peak Throughput", card_title_style)
+                    ],
+                    [
+                        Paragraph(stable_threshold, card_value_style),
+                        Paragraph(degradation_onset, card_value_style),
+                        Paragraph(critical_point, card_value_style),
+                        Paragraph(peak_throughput, card_value_style)
+                    ]
+                ]
+                cards_table = Table(cards_data, colWidths=[135, 135, 135, 135])
+                cards_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8F9F9')),
+                    ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#E0E0E0')),
+                    ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('TOPPADDING', (0,0), (-1,-1), 10),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+                    ('LINEABOVE', (0,0), (0,0), 3, colors.HexColor('#27AE60')), # Green
+                    ('LINEABOVE', (1,0), (1,0), 3, colors.HexColor('#F39C12')), # Yellow
+                    ('LINEABOVE', (2,0), (2,0), 3, colors.HexColor('#C0392B')), # Red
+                    ('LINEABOVE', (3,0), (3,0), 3, colors.HexColor('#2980B9')), # Blue
+                ]))
+                story.append(cards_table)
+                story.append(Spacer(1, 15))
+
+        # Removed Executive Verdict & Key Insights
+
+        # --- Throughput Analysis Section (Dynamic numbering) ---
+        if tps_data_available and is_ramping:
+            throughput_header_elements = [
+                Paragraph(f"<i>{section_num}. Throughput Analysis</i>", main_subheader_style)
+            ]
+            hr_throughput = Table([['']], colWidths=[540])
+            hr_throughput.setStyle(TableStyle([
+                ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+                ('TOPPADDING', (0,0), (-1,-1), 0),
+            ]))
+            throughput_header_elements.append(hr_throughput)
+            throughput_header_elements.append(Spacer(1, 15))
+            throughput_header_elements.append(Paragraph("TPS Interval Analysis", section_style))
+            
+            tps_table_headers = ["TPS Bucket", "Total Requests", "Failed Requests", "Error Rate %"]
+            tps_table_data = [[
+                Paragraph(h, cell_header_style if i == 0 else cell_header_center)
+                for i, h in enumerate(tps_table_headers)
+            ]]
+
+            for lower, upper in sorted_bucket_keys:
+                b_data = buckets[(lower, upper)]
+                tot = b_data["requests"]
+                fail = b_data["failed"]
+                err_rate = (fail / tot * 100) if tot > 0 else 0.0
+                
+                tps_table_data.append([
+                    Paragraph(f"{lower}-{upper} TPS", cell_data_style),
+                    Paragraph(f"{int(round(tot)):,}", cell_data_center),
+                    Paragraph(f"{int(round(fail)):,}", cell_data_center),
+                    Paragraph(f"{err_rate:.2f}%", cell_data_center)
+                ])
+                
+            tps_interval_table = Table(tps_table_data, colWidths=[150, 130, 130, 130])
+            tps_interval_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
+                ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
+                ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
+                ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING', (0,0), (-1,-1), 6),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+                ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ]))
+            
+            if len(sorted_bucket_keys) <= 15:
+                throughput_header_elements.append(tps_interval_table)
+                story.append(KeepTogether(throughput_header_elements))
+            else:
+                story.append(KeepTogether(throughput_header_elements))
+                story.append(tps_interval_table)
+                
+            story.append(Spacer(1, 24))
+            section_num += 1
+
+        # Detailed Performance Summary Section
+        perf_header_elements = [
+            Paragraph(f"<i>{section_num}. Performance Summary</i>", main_subheader_style),
+            hr
+        ]
+        story.append(KeepTogether(perf_header_elements))
+        story.append(Spacer(1, 15))
+        
+        # Trends Section
         trends_headers = ["metric", "avg", "max", "med", "min", "p90", "p95", "p99"]
         trends_data = [[
             Paragraph(h, cell_header_style if i == 0 else cell_header_center)
@@ -567,11 +1014,14 @@ Based on the performance test results:
             ('LEFTPADDING', (0,0), (-1,-1), 6),
             ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ]))
-        story.append(trends_table)
+        story.append(KeepTogether([
+            Paragraph("Trends", section_style),
+            trends_table
+        ]))
         story.append(Spacer(1, 24))
         
-        # 3. Counters, Rates, and Gauges (Side-by-side columns)
-        # Counters
+        # 3. Counters, Rates, and Gauges (Full-width sequential tables)
+        # Counters Section
         counters_headers = ["metric", "count", "rate"]
         counters_data = [[
             Paragraph(h, cell_header_style if i == 0 else cell_header_center)
@@ -587,19 +1037,25 @@ Based on the performance test results:
                     Paragraph(parsed["count"], cell_data_center),
                     Paragraph(parsed["rate"], cell_data_center)
                 ])
-        counters_table = Table(counters_data, colWidths=[70, 50, 50])
+        counters_table = Table(counters_data, colWidths=[240, 150, 150])
         counters_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
             ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
-            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#BDC3C7')),
+            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
             ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
             ('TOPPADDING', (0,0), (-1,-1), 6),
             ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING', (0,0), (-1,-1), 4),
-            ('RIGHTPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ]))
+        story.append(KeepTogether([
+            Paragraph("Counters", section_style),
+            counters_table
+        ]))
+        story.append(Spacer(1, 24))
         
-        # Rates
+        # Rates Section
         rates_headers = ["metric", "rate"]
         rates_data = [[
             Paragraph(h, cell_header_style if i == 0 else cell_header_center)
@@ -641,19 +1097,25 @@ Based on the performance test results:
             Paragraph(failed_rate, cell_data_center)
         ])
         
-        rates_table = Table(rates_data, colWidths=[90, 60])
+        rates_table = Table(rates_data, colWidths=[270, 270])
         rates_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
             ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
-            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#BDC3C7')),
+            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
             ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
             ('TOPPADDING', (0,0), (-1,-1), 6),
             ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING', (0,0), (-1,-1), 4),
-            ('RIGHTPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ]))
+        story.append(KeepTogether([
+            Paragraph("Rates", section_style),
+            rates_table
+        ]))
+        story.append(Spacer(1, 24))
         
-        # Gauges
+        # Gauges Section
         gauges_headers = ["metric", "value"]
         gauges_data = [[
             Paragraph(h, cell_header_style if i == 0 else cell_header_center)
@@ -669,45 +1131,30 @@ Based on the performance test results:
                 Paragraph(val, cell_data_center)
             ])
             
-        gauges_table = Table(gauges_data, colWidths=[90, 60])
+        gauges_table = Table(gauges_data, colWidths=[270, 270])
         gauges_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
             ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
-            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#BDC3C7')),
+            ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
             ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
             ('TOPPADDING', (0,0), (-1,-1), 6),
             ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING', (0,0), (-1,-1), 4),
-            ('RIGHTPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ]))
-        
-        # Embed all 3 tables side-by-side in a layout Table
-        layout_data = [[
-            [Paragraph("Counters", section_style), Spacer(1, 8), counters_table],
-            "", # spacer
-            [Paragraph("Rates", section_style), Spacer(1, 8), rates_table],
-            "", # spacer
-            [Paragraph("Gauges", section_style), Spacer(1, 8), gauges_table]
-        ]]
-        
-        layout_table = Table(
-            layout_data,
-            colWidths=[170, 25, 150, 25, 150]
-        )
-        layout_table.setStyle(TableStyle([
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-            ('LEFTPADDING', (0,0), (-1,-1), 0),
-            ('RIGHTPADDING', (0,0), (-1,-1), 0),
-            ('TOPPADDING', (0,0), (-1,-1), 0),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+        story.append(KeepTogether([
+            Paragraph("Gauges", section_style),
+            gauges_table
         ]))
-        story.append(layout_table)
+        story.append(Spacer(1, 24))
         
-        # 3.5. Checks Section (Optional, only if checks exist in the metrics)
+        section_num += 1
+        
+        # 3.5. Checks Section (Optional)
         checks_data = []
         root_group = self.raw_summary.get("root_group", {}) if isinstance(self.raw_summary, dict) else {}
         if root_group:
-            # support both root and nested checks in groups recursively
             def process_group_pdf(group, prefix=""):
                 for check in group.get("checks", []):
                     name = check.get("name", "check")
@@ -731,8 +1178,6 @@ Based on the performance test results:
             
         if checks_data:
             story.append(Spacer(1, 24))
-            story.append(Paragraph("Checks", section_style))
-            story.append(Spacer(1, 8))
             
             checks_headers = ["Check Name", "Passed", "Failed", "Success Rate", "Status"]
             checks_table_data = [[
@@ -782,9 +1227,12 @@ Based on the performance test results:
                 ('LEFTPADDING', (0,0), (-1,-1), 6),
                 ('RIGHTPADDING', (0,0), (-1,-1), 6),
             ]))
-            story.append(checks_table)
+            story.append(KeepTogether([
+                Paragraph("Checks", section_style),
+                checks_table
+            ]))
         
-        # 4. Thresholds Section (Optional, only if thresholds exist in the metrics)
+        # 4. Thresholds Section (Optional)
         thresholds_data = []
         if isinstance(self.raw_summary, dict) and "metrics" in self.raw_summary:
             for metric_name, metric_data in self.raw_summary["metrics"].items():
@@ -824,8 +1272,6 @@ Based on the performance test results:
                 
         if thresholds_data:
             story.append(Spacer(1, 24))
-            story.append(Paragraph("Thresholds", section_style))
-            story.append(Spacer(1, 8))
             
             table_headers = ["Threshold Metric", "Target Condition", "Actual Value", "Status"]
             table_data = [[
@@ -874,47 +1320,17 @@ Based on the performance test results:
                 ('LEFTPADDING', (0,0), (-1,-1), 6),
                 ('RIGHTPADDING', (0,0), (-1,-1), 6),
             ]))
-            story.append(thresholds_table)
-            
-        # --- Page 2: Advanced SRE Analysis Sections (Error Analysis, Observation, Recommendations, Conclusion) ---
-        # 1. Custom Typography Styles for SRE Page
-        analysis_title_style = ParagraphStyle(
-            name='AnalysisTitleStyle',
-            fontName='Helvetica-Bold',
-            fontSize=16,
-            textColor=colors.HexColor('#2C3E50'),
-            leading=20,
-            spaceAfter=12
-        )
-        
-        analysis_header_style = ParagraphStyle(
-            name='AnalysisHeaderStyle',
-            fontName='Helvetica-Bold',
-            fontSize=11,
-            textColor=colors.HexColor('#2C3E50'),
-            leading=15,
-            spaceBefore=14,
-            spaceAfter=6,
-            keepWithNext=True
-        )
-        
-        analysis_text_style = ParagraphStyle(
-            name='AnalysisTextStyle',
-            fontName='Helvetica',
-            fontSize=9.0,
-            textColor=colors.HexColor('#34495E'),
-            leading=13,
-            spaceAfter=6
-        )
+            story.append(KeepTogether([
+                Paragraph("Thresholds", section_style),
+                thresholds_table
+            ]))
 
-        # 2. Append Page Break to separate summary tables and deep analysis
-        story.append(PageBreak())
-        
-        # 3. Preprocess and generate analysis text using database + LLM
+        # Removed explicit page break
+
+        # --- Page 3+: Advanced SRE Analysis Sections (Error Analysis, Observation, Recommendations, Conclusion) ---
         preprocessed_logs, preprocessed_anomalies = self.fetch_analysis_data()
         analysis_text = self.generate_analysis(preprocessed_logs, preprocessed_anomalies)
         
-        # 4. Parse output sections dynamically using Regex
         analysis_sections = {
             "1. Error Analysis": "",
             "2. Observation": "",
@@ -936,26 +1352,40 @@ Based on the performance test results:
             else:
                 analysis_sections[name] = "No deep-dive analysis compiled for this section."
 
-        # 5. Append SRE Header Flow
-        story.append(Paragraph("<i>Advanced Analysis</i>", main_subheader_style))
-        story.append(Spacer(1, 10))
-        
+        # SRE Header Flow
+        sre_header_elements = [
+            Paragraph(f"<i>{section_num}. Advanced Analysis</i>", main_subheader_style)
+        ]
         hr2 = Table([['']], colWidths=[540])
         hr2.setStyle(TableStyle([
             ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
             ('BOTTOMPADDING', (0,0), (-1,-1), 0),
             ('TOPPADDING', (0,0), (-1,-1), 0),
         ]))
-        story.append(hr2)
+        sre_header_elements.append(hr2)
+        story.append(KeepTogether(sre_header_elements))
         story.append(Spacer(1, 15))
         
-        # 6. Append analytical sections and convert bullets & bolding dynamically
+        # Dynamic subsection numbering (e.g. 4.1 Error Analysis)
+        sub_idx = 1
         for name, content in analysis_sections.items():
-            story.append(Paragraph(name, analysis_header_style))
+            # Strip existing prefix like "1. " or "2. " from the name
+            clean_name = re.sub(r'^\d+\.\s*', '', name)
+            numbered_name = f"{section_num}.{sub_idx} {clean_name}"
+            sub_idx += 1
+            
             html_content = self.markdown_to_html(content)
-            for block in html_content.split("<br/>"):
-                if block.strip():
-                    story.append(Paragraph(block.strip(), analysis_text_style))
+            paragraphs = [Paragraph(block.strip(), analysis_text_style) for block in html_content.split("<br/>") if block.strip()]
+            
+            if paragraphs:
+                story.append(KeepTogether([
+                    Paragraph(numbered_name, analysis_header_style),
+                    paragraphs[0]
+                ]))
+                for p in paragraphs[1:]:
+                    story.append(p)
+            else:
+                story.append(Paragraph(numbered_name, analysis_header_style))
             story.append(Spacer(1, 4))
             
         doc.build(story)
