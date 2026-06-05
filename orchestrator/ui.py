@@ -818,6 +818,21 @@ if send_btn and query_input:
                         st.session_state.runner_is_manual_script = False
                         st.session_state.runner_pending_vus = extract_vus_from_script(observation)
                 
+                if not script_generated:
+                    import re
+                    code_block_match = re.search(r"```(?:javascript|js)\n(.*?)```", ans, re.DOTALL)
+                    if code_block_match:
+                        extracted_script = code_block_match.group(1).strip()
+                    else:
+                        extracted_script = ans.strip()
+                    
+                    if "import " in extracted_script and ("k6/http" in extracted_script or "k6" in extracted_script):
+                        cleaned_script = extracted_script.replace('```javascript', '').replace('```js', '').replace('```', '').strip()
+                        script_generated = True
+                        st.session_state.runner_pending_script = cleaned_script
+                        st.session_state.runner_is_manual_script = False
+                        st.session_state.runner_pending_vus = extract_vus_from_script(cleaned_script)
+                
                 # Check for generated DB summary PDF reports
                 pdf_path = None
                 for action, observation in intermediate_steps:

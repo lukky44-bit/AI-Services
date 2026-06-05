@@ -314,58 +314,76 @@ class   PDFReportBuilder:
             conn = db.get_connection()
             cursor = conn.cursor()
             
-            # Fetch k6_http_reqs_total
-            cursor.execute(
-                "SELECT ts, value FROM realtime_metrics WHERE run_id = %s AND name = 'k6_http_reqs_total' ORDER BY ts ASC;",
-                (self.run_id,)
-            )
-            reqs = cursor.fetchall()
-            
-            # Fetch k6_http_req_failed_rate
-            cursor.execute(
-                "SELECT ts, value FROM realtime_metrics WHERE run_id = %s AND name = 'k6_http_req_failed_rate' ORDER BY ts ASC;",
-                (self.run_id,)
-            )
-            fails = cursor.fetchall()
+            # Extract max target TPS from the script if available
+            max_target = None
+            if self.script:
+                import re
+                targets = re.findall(r'target\s*:\s*(\d+)', self.script)
+                targets += re.findall(r'"target"\s*:\s*(\d+)', self.script)
+                targets += re.findall(r"'target'\s*:\s*(\d+)", self.script)
+                targets += re.findall(r'rate\s*:\s*(\d+)', self.script)
+                targets += re.findall(r'"rate"\s*:\s*(\d+)', self.script)
+                targets += re.findall(r"'rate'\s*:\s*(\d+)", self.script)
+                if targets:
+                    max_target = float(max(int(t) for t in targets))
+
+            # Check if metrics are cumulative or raw event values (1.0 per request)
+            cursor.execute("SELECT MAX(value) FROM realtime_metrics WHERE run_id = %s AND name = 'k6_http_reqs_total';", (self.run_id,))
+            max_val_row = cursor.fetchone()
+            max_val = max_val_row[0] if max_val_row else None
+            is_cumulative = False
+            if max_val and max_val > 5.0:
+                is_cumulative = True
+                
+            query = """
+            SELECT 
+                date_trunc('second', ts) AS timestamp_sec,
+                MAX(CASE WHEN name = 'k6_http_reqs_total' THEN value END) AS max_reqs_total,
+                SUM(CASE WHEN name = 'k6_http_reqs_total' THEN value END) AS sum_reqs_total,
+                AVG(CASE WHEN name = 'k6_http_req_failed_rate' THEN value END) AS failed_rate
+            FROM realtime_metrics
+            WHERE run_id = %s AND name IN ('k6_http_reqs_total', 'k6_http_req_failed_rate')
+            GROUP BY date_trunc('second', ts)
+            ORDER BY timestamp_sec ASC;
+            """
+            cursor.execute(query, (self.run_id,))
+            rows = cursor.fetchall()
             conn.close()
             
-            if not reqs:
-                return [], {}, False
+            if not rows:
+                return [], {}, [], False
                 
-            # Align failed rates with request counts using two-pointer
-            aligned = []
-            fail_idx = 0
-            for req_ts, req_val in reqs:
-                best_fail_val = 0.0
-                min_diff = float('inf')
-                while fail_idx < len(fails):
-                    fail_ts, fail_val = fails[fail_idx]
-                    diff = abs((fail_ts - req_ts).total_seconds())
-                    if diff < min_diff:
-                        min_diff = diff
-                        best_fail_val = fail_val
-                        fail_idx += 1
+            tps_values = []
+            buckets = {}
+            tps_intervals = []
+            
+            # Python parsing of rows to handle forward-filling of values
+            clean_rows = []
+            last_reqs = 0.0
+            last_fail = 0.0
+            for timestamp_sec, max_reqs_total, sum_reqs_total, failed_rate in rows:
+                if is_cumulative:
+                    reqs = max_reqs_total
+                    if reqs is None:
+                        reqs = last_reqs
                     else:
-                        break
-                if fail_idx > 0:
-                    fail_idx -= 1
-                aligned.append((req_ts, req_val, best_fail_val))
+                        last_reqs = reqs
+                else:
+                    reqs = sum_reqs_total
+                    if reqs is None:
+                        reqs = 0.0
                 
-            # Check if metrics are cumulative or raw event values (1.0 per request)
-            is_cumulative = False
-            if len(reqs) > 1:
-                max_val = max(r[1] for r in reqs)
-                if max_val > 5.0 and reqs[-1][1] >= reqs[0][1]:
-                    is_cumulative = True
-                    
+                if failed_rate is None:
+                    failed_rate = last_fail
+                else:
+                    last_fail = failed_rate
+                
+                clean_rows.append((timestamp_sec, reqs, failed_rate))
+
             if is_cumulative:
-                if len(reqs) < 2:
-                    return [], {}, False
-                tps_values = []
-                buckets = {}
-                for i in range(1, len(aligned)):
-                    ts_prev, req_prev, fail_prev = aligned[i-1]
-                    ts_curr, req_curr, fail_curr = aligned[i]
+                for i in range(1, len(clean_rows)):
+                    ts_prev, req_prev, fail_prev = clean_rows[i-1]
+                    ts_curr, req_curr, fail_curr = clean_rows[i]
                     
                     diff_sec = (ts_curr - ts_prev).total_seconds()
                     if diff_sec <= 0:
@@ -376,7 +394,11 @@ class   PDFReportBuilder:
                         diff_req = 0.0
                         
                     tps = diff_req / diff_sec
+                    if max_target is not None and tps > max_target:
+                        tps = max_target
+                        diff_req = max_target * diff_sec
                     tps_values.append(tps)
+                    tps_intervals.append({"tps": tps, "fail_rate": fail_curr})
                     
                     lower = (int(tps) // 10) * 10
                     upper = lower + 9
@@ -389,20 +411,23 @@ class   PDFReportBuilder:
                     buckets[bucket_key]["requests"] += diff_req
                     buckets[bucket_key]["failed"] += failed_reqs
             else:
-                # Group raw events by 1-second window
-                tps_by_second = {}
-                for req_ts, req_val, fail_val in aligned:
-                    sec_ts = req_ts.replace(microsecond=0)
-                    if sec_ts not in tps_by_second:
-                        tps_by_second[sec_ts] = {"requests": 0.0, "failed": 0.0}
-                    tps_by_second[sec_ts]["requests"] += req_val
-                    tps_by_second[sec_ts]["failed"] += req_val * fail_val
-                
-                tps_values = []
-                buckets = {}
-                for sec_ts, data in tps_by_second.items():
-                    tps = data["requests"]
+                for i in range(len(clean_rows)):
+                    if i == 0:
+                        diff_sec = 1.0
+                        ts_curr, sum_req, fail_curr = clean_rows[i]
+                    else:
+                        ts_prev, _, _ = clean_rows[i-1]
+                        ts_curr, sum_req, fail_curr = clean_rows[i]
+                        diff_sec = (ts_curr - ts_prev).total_seconds()
+                        if diff_sec <= 0:
+                            diff_sec = 1.0
+                            
+                    tps = sum_req / diff_sec
+                    if max_target is not None and tps > max_target:
+                        tps = max_target
+                        sum_req = max_target * diff_sec
                     tps_values.append(tps)
+                    tps_intervals.append({"tps": tps, "fail_rate": fail_curr})
                     
                     lower = (int(tps) // 10) * 10
                     upper = lower + 9
@@ -410,15 +435,15 @@ class   PDFReportBuilder:
                     
                     if bucket_key not in buckets:
                         buckets[bucket_key] = {"requests": 0.0, "failed": 0.0}
-                    buckets[bucket_key]["requests"] += data["requests"]
-                    buckets[bucket_key]["failed"] += data["failed"]
+                    buckets[bucket_key]["requests"] += sum_req
+                    buckets[bucket_key]["failed"] += sum_req * fail_curr
                     
             if not tps_values:
-                return [], {}, False
+                return [], {}, [], False
                 
-            return tps_values, buckets, True
+            return tps_values, buckets, tps_intervals, True
         except Exception as e:
-            return [], {}, False
+            return [], {}, [], False
 
     def generate_analysis(self, preprocessed_logs, preprocessed_anomalies) -> str:
         """Invokes LLM with specific prompt templates to generate numbered deep-dive analysis blocks."""
@@ -509,6 +534,8 @@ Analyze the provided k6 performance testing script and write a concise, user-fri
 1. What target endpoint/URL the user wanted to test.
 2. The testing type/scenario (e.g. spike, load, stress, constant arrival rate).
 3. The load profile (VUs, rate, duration, stages).
+
+CRITICAL: Distinguish carefully between Virtual Users (VUs) and arrival rate / RPS (Requests Per Second). For example, for ramping-arrival-rate and constant-arrival-rate executors, the 'target' or 'rate' values in stages represent requests per second (RPS), NOT Virtual Users (VUs). Be sure to explicitly refer to these target rates as RPS or requests/second in your summary.
 
 Make the tone professional and clear, explaining the test configuration as a natural language summary of the user's intent. Do not include any greeting, introductory text, or conversational filler.
 """
@@ -768,7 +795,7 @@ Metrics: {json.dumps(metrics_summary, indent=2)}
         story.append(Spacer(1, 12))
         
         # Calculate TPS data
-        tps_values, buckets, tps_data_available = self.fetch_tps_data()
+        tps_values, buckets, tps_intervals, tps_data_available = self.fetch_tps_data()
         
         if not tps_data_available:
             story.append(Paragraph("<b>Insufficient TPS Data</b>", ParagraphStyle(
@@ -823,44 +850,39 @@ Metrics: {json.dumps(metrics_summary, indent=2)}
                 story.append(tps_table)
                 story.append(Spacer(1, 15))
             else:
-                sorted_bucket_keys = sorted(buckets.keys())
-                
-                stable_upper = None
-                for lower, upper in sorted_bucket_keys:
-                    b_data = buckets[(lower, upper)]
-                    tot = b_data["requests"]
-                    fail = b_data["failed"]
-                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
-                    if err_rate < 5.0:
-                        stable_upper = upper
-                    else:
-                        break
-                stable_threshold = f"0-{stable_upper} TPS" if stable_upper is not None else "N/A"
-                
+                # Calculate Stable Threshold (fail_rate <= 0.01)
+                stable_vals = [item["tps"] for item in tps_intervals if item["fail_rate"] <= 0.01 and item["tps"] > 0.0]
+                if stable_vals:
+                    min_stable = int(round(min(stable_vals)))
+                    max_stable = int(round(max(stable_vals)))
+                    if min_stable > max_stable:
+                        min_stable = max_stable
+                    stable_threshold = f"{min_stable}-{max_stable} TPS"
+                else:
+                    stable_threshold = "N/A"
+
+                # Calculate Degradation Onset (chronological moment failure rate reaches or climbs past 10%)
                 degradation_onset = "N/A"
-                for lower, upper in sorted_bucket_keys:
-                    b_data = buckets[(lower, upper)]
-                    tot = b_data["requests"]
-                    fail = b_data["failed"]
-                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
-                    if err_rate >= 5.0:
-                        degradation_onset = f"{lower} TPS"
+                for item in tps_intervals:
+                    if item["fail_rate"] >= 0.10:
+                        val = int(round(item["tps"]))
+                        degradation_onset = f"{val} TPS"
                         break
-                        
-                critical_point = "N/A"
-                for lower, upper in sorted_bucket_keys:
-                    b_data = buckets[(lower, upper)]
-                    tot = b_data["requests"]
-                    fail = b_data["failed"]
-                    err_rate = (fail / tot * 100) if tot > 0 else 0.0
-                    if err_rate >= 20.0:
-                        critical_point = f"{lower}-{upper} TPS"
-                        break
-                        
-                peak_throughput = "N/A"
-                if sorted_bucket_keys:
-                    max_lower, max_upper = sorted_bucket_keys[-1]
-                    peak_throughput = f"{max_lower}-{max_upper} TPS"
+
+                # Calculate Critical Point (max TPS when failure rate reaches or exceeds 50%)
+                critical_tps_list = [item["tps"] for item in tps_intervals if item["fail_rate"] >= 0.50]
+                if critical_tps_list:
+                    val = int(round(max(critical_tps_list)))
+                    critical_point = f"{val} TPS"
+                else:
+                    critical_point = "N/A"
+
+                # Calculate Peak Throughput (max overall TPS)
+                if tps_values:
+                    val = int(round(max(tps_values)))
+                    peak_throughput = f"{val} TPS"
+                else:
+                    peak_throughput = "N/A"
                     
                 card_title_style = ParagraphStyle(
                     name='CardTitleStyle',
@@ -912,62 +934,7 @@ Metrics: {json.dumps(metrics_summary, indent=2)}
 
         # Removed Executive Verdict & Key Insights
 
-        # --- Throughput Analysis Section (Dynamic numbering) ---
-        if tps_data_available and is_ramping:
-            throughput_header_elements = [
-                Paragraph(f"<i>{section_num}. Throughput Analysis</i>", main_subheader_style)
-            ]
-            hr_throughput = Table([['']], colWidths=[540])
-            hr_throughput.setStyle(TableStyle([
-                ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.HexColor('#2C3E50')),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 0),
-                ('TOPPADDING', (0,0), (-1,-1), 0),
-            ]))
-            throughput_header_elements.append(hr_throughput)
-            throughput_header_elements.append(Spacer(1, 15))
-            throughput_header_elements.append(Paragraph("TPS Interval Analysis", section_style))
-            
-            tps_table_headers = ["TPS Bucket", "Total Requests", "Failed Requests", "Error Rate %"]
-            tps_table_data = [[
-                Paragraph(h, cell_header_style if i == 0 else cell_header_center)
-                for i, h in enumerate(tps_table_headers)
-            ]]
-
-            for lower, upper in sorted_bucket_keys:
-                b_data = buckets[(lower, upper)]
-                tot = b_data["requests"]
-                fail = b_data["failed"]
-                err_rate = (fail / tot * 100) if tot > 0 else 0.0
-                
-                tps_table_data.append([
-                    Paragraph(f"{lower}-{upper} TPS", cell_data_style),
-                    Paragraph(f"{int(round(tot)):,}", cell_data_center),
-                    Paragraph(f"{int(round(fail)):,}", cell_data_center),
-                    Paragraph(f"{err_rate:.2f}%", cell_data_center)
-                ])
-                
-            tps_interval_table = Table(tps_table_data, colWidths=[150, 130, 130, 130])
-            tps_interval_table.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#ECF0F1')),
-                ('LINEABOVE', (0,0), (-1,0), 1, colors.HexColor('#E0E0E0')),
-                ('LINEBELOW', (0,0), (-1,0), 1.5, colors.HexColor('#2980B9')),
-                ('LINEBELOW', (0,1), (-1,-1), 0.5, colors.HexColor('#E0E0E0')),
-                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ('TOPPADDING', (0,0), (-1,-1), 6),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-                ('LEFTPADDING', (0,0), (-1,-1), 6),
-                ('RIGHTPADDING', (0,0), (-1,-1), 6),
-            ]))
-            
-            if len(sorted_bucket_keys) <= 15:
-                throughput_header_elements.append(tps_interval_table)
-                story.append(KeepTogether(throughput_header_elements))
-            else:
-                story.append(KeepTogether(throughput_header_elements))
-                story.append(tps_interval_table)
-                
-            story.append(Spacer(1, 24))
-            section_num += 1
+        # Removed Throughput Analysis Section per user request
 
         # Detailed Performance Summary Section
         perf_header_elements = [

@@ -16,8 +16,11 @@ except ImportError:
     from tools import RunnerTools
     from prompts import RunnerAgentPrompts
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from absolute path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+env_path = os.path.join(parent_dir, ".env")
+load_dotenv(env_path)
 
 class RunnerAgent:
     """Orchestrates the LLM, Tools, and Prompts for the Runner Agent."""

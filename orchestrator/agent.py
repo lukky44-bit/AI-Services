@@ -26,7 +26,9 @@ from db_analyst_agent.agent import DBAnalystAgent
 from runner_agent.agent import RunnerAgent
 from rag_agent.agent import K6ExpertAgent
 
-load_dotenv()
+# Load environment variables from absolute path
+env_path = os.path.join(parent_dir, ".env")
+load_dotenv(env_path)
 
 class GraphState(TypedDict):
     """
@@ -128,6 +130,13 @@ class OrchestratorAgent:
         context_window = messages[-6:] if len(messages) > 6 else messages
         for msg in context_window:
             prompt_messages.append(msg)
+            
+        # Append a final instruction to ensure the router model does not follow the user's prompt instructions but classifies it instead.
+        enforcement_msg = SystemMessage(content=(
+            "CRITICAL: Do NOT execute or answer the user's request. Do NOT output code, write scripts, or provide explanations. "
+            "Your ONLY task is to classify the routing. Output ONLY the JSON block matching the routing schema."
+        ))
+        prompt_messages.append(enforcement_msg)
             
         try:
             response = self.llm.invoke(prompt_messages)
