@@ -20,6 +20,7 @@ durationpy==0.10
 filelock==3.29.0
 FlashRank==0.2.10
 flatbuffers==25.12.19
+fastapi==0.110.0
 frozenlist==1.8.0
 fsspec==2026.4.0
 gitdb==4.0.12

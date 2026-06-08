@@ -22,9 +22,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Base
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 
-from db_analyst_agent.agent import DBAnalystAgent
-from runner_agent.agent import RunnerAgent
-from rag_agent.agent import K6ExpertAgent
+from db_analyst.agent import DBAnalystAgent
+from runner.agent import RunnerAgent
+from rag.agent import K6ExpertAgent
 
 # Load environment variables from absolute path
 env_path = os.path.join(parent_dir, ".env")
@@ -269,5 +269,7 @@ class OrchestratorAgent:
             "messages": [output_state["messages"][-1]], # The latest AI message
             "intermediate_steps": output_state.get("intermediate_steps", []),
             "route": output_state.get("route", "direct"),
-            "reason": output_state.get("reason", "")
+            "reason": output_state.get("reason", ""),
+            "pdf_path": output_state.get("pdf_path", ""),
+            "sources": output_state.get("sources", [])
         }

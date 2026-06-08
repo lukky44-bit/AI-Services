@@ -1,0 +1,16 @@
+langchain
+langchain-groq
+langgraph
+python-dotenv
+typing-extensions
+langchain-chroma
+langchain-huggingface
+sentence-transformers
+requests
+tqdm
+langchain-text-splitters
+redis
+langchain-community
+flashrank
+rank_bm25
+chromadb
